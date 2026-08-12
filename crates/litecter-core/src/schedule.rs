@@ -4,6 +4,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// How often a URL is checked.
+///
+/// Weekly is the default for new URLs (set in the `urls` table DDL, the CLI's
+/// `--every` default, and the app's add bar — change all three together).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Schedule {

@@ -125,6 +125,10 @@ async fn update_tray(app: &AppHandle, store: &SharedStore) {
 
 /// Once per local day at/after the configured hour, while unseen changes
 /// exist — the re-nag until inbox zero.
+///
+/// The digest is the only notification the app sends; a detected change updates
+/// the tray badge and nothing else. See the matching note in
+/// `litecter_core::scheduler::tick` before adding per-change pings.
 async fn maybe_digest(app: &AppHandle, store: &SharedStore) {
     let local = chrono::Local::now();
     let digest_hour: u32 = {

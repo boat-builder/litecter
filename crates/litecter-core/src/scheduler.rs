@@ -94,6 +94,12 @@ async fn tick<N: Fn(&str, &str)>(store: &Store, opts: &DaemonOptions, notify: &N
 
     // Daily digest: once per local day, at or after the configured hour,
     // and only while unseen changes exist — the re-nag until inbox-zero.
+    //
+    // This is the *only* notification Litecter sends. Detecting a change
+    // deliberately does not notify: a batch that finds 20 changes would mean 20
+    // interruptions, and the whole point of the digest is that missing one
+    // notification costs nothing because tomorrow's repeats it. Don't add
+    // per-change pings here without making them opt-in.
     let local = Local::now();
     if local.hour() >= opts.digest_hour {
         let today = local.format("%Y-%m-%d").to_string();

@@ -15,7 +15,13 @@ const DEFAULT_SETTLE_MS: u64 = 1_500;
 ///
 /// Lifecycle is wake → check → sleep: callers launch this only when checks are
 /// due and `shutdown()` it as soon as the batch drains. At rest no browser
-/// process exists.
+/// process exists — Litecter is a background app, so idling on a live browser
+/// would be the single most expensive thing it does.
+///
+/// One tab, checks run serially. A tab pool was considered and rejected: at the
+/// schedules this tool is built for, due-batches are small and a serial tab
+/// clears them with room to spare. Reach for concurrency only if batches
+/// actually start outgrowing their interval.
 pub struct Renderer {
     browser: Browser,
     page: Page,

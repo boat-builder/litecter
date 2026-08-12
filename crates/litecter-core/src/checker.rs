@@ -5,6 +5,11 @@ use crate::renderer::Renderer;
 use crate::store::{Store, UrlRow};
 use crate::textproc;
 
+/// Snapshots retained per URL. 10 is a deliberate ceiling rather than full
+/// history: it bounds the database while leaving room to compare a few
+/// revisions back. `Store::prune_snapshots` additionally never deletes a
+/// snapshot a change row or a last-seen pointer still references, so the
+/// review trail survives pruning regardless of this number.
 const SNAPSHOTS_KEPT: usize = 10;
 
 #[derive(Debug)]

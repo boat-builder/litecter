@@ -7,7 +7,7 @@ diffs the *rendered visible text* against what you last reviewed. Changes collec
 inbox and a once-a-day notification nags you until you've marked them seen.
 
 Ships as a macOS menu-bar app and a CLI/daemon for servers. Both share one Rust engine
-and one SQLite file.
+and one SQLite file. [BACKLOG.md](BACKLOG.md) lists what's designed but not yet built.
 
 ## Layout
 
@@ -17,7 +17,7 @@ crates/litecter-cli/    `litecter` binary — CLI + `litecter daemon`
 app/                    Tauri 2 + Svelte desktop app
   src/                  frontend (Changes inbox, Library, diff panel)
   src-tauri/            thin Rust shell — IPC commands, tray, autostart
-SPEC.md                 requirements + design decisions — read this first
+BACKLOG.md              designed but not built — start here for something to pick up
 ```
 
 All logic lives in `litecter-core`; both shells are thin. Adding a feature usually means
@@ -103,6 +103,6 @@ WantedBy=default.target
 
 ## Not built yet
 
-`j/k` list navigation, snapshot-history compare in the diff view, `export`/`import`,
-and UI editing of per-URL selectors and ignore-regex filters (the engine supports both;
-only `--selector` is wired up, via the CLI).
+Resource blocking during checks, list virtualization, FTS5 search, `j/k` navigation,
+snapshot-history compare, `export`/`import`, pause, and UI editing of per-URL ignore
+filters — see [BACKLOG.md](BACKLOG.md), which has the reasoning and an approach for each.
