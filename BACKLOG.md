@@ -171,7 +171,7 @@ check that flag too.
 ### 14. Launch-at-login toggle in the tray menu
 **Where:** `app/src-tauri/src/main.rs` — the `TrayIconBuilder` menu.
 
-The tray menu has Open / Check due now / Quit. Autostart is only reachable through
+The tray menu has Open / Add link / Check due now / Quit. Autostart is only reachable through
 Settings. Add it as a checkable tray item (`CheckMenuItem`) reading
 `app.autolaunch().is_enabled()`.
 

@@ -99,12 +99,22 @@
     }
   }
 
+  function focusAdd() {
+    // The window may have just been un-hidden by the tray; wait a frame for it.
+    requestAnimationFrame(() => {
+      addInput?.focus();
+      addInput?.select();
+    });
+  }
+
   onMount(() => {
     refresh();
     const unlisten = listen('litecter://refresh', refresh);
+    const unlistenAdd = listen('litecter://focus-add', focusAdd);
     const poll = setInterval(refresh, 30_000);
     return () => {
       unlisten.then((f) => f());
+      unlistenAdd.then((f) => f());
       clearInterval(poll);
     };
   });

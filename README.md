@@ -78,7 +78,7 @@ Browser: auto-detected from the usual install paths; pin one with
 Launch at login is enabled on first run (it registers a LaunchAgent pointing at the
 binary's current path, so install to `/Applications` before enabling — or re-toggle it in
 Settings after moving the app). Closing the window hides to the menu bar; the tray icon
-carries the unreviewed count and Quit lives in its menu.
+carries the unreviewed count and its menu holds Open / Add link / Check due now / Quit.
 
 ## Server deployment
 
