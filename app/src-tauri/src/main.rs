@@ -57,6 +57,13 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Show the window with the add bar focused — the tray's "Add link" path.
+/// Emitted after `show_main` so the webview is visible before it takes focus.
+fn show_add(app: &AppHandle) {
+    show_main(app);
+    let _ = app.emit("litecter://focus-add", ());
+}
+
 // ---- background checking ----------------------------------------------------
 
 /// Check a batch with the wake → check → sleep browser lifecycle. The store
@@ -358,14 +365,16 @@ fn main() {
             app.manage(AppState { store: store.clone() });
 
             let open = MenuItem::with_id(app, "open", "Open Litecter", true, None::<&str>)?;
+            let add = MenuItem::with_id(app, "add", "Add link…", true, None::<&str>)?;
             let check = MenuItem::with_id(app, "check", "Check due now", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Litecter", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &check, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &add, &check, &quit])?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().expect("bundled icon").clone())
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main(app),
+                    "add" => show_add(app),
                     "check" => {
                         let state: State<'_, AppState> = app.state();
                         let store = state.store.clone();
