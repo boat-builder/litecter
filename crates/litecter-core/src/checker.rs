@@ -76,11 +76,11 @@ fn persist_ok(store: &Store, u: &UrlRow, f: Fetched, now: i64) -> Result<CheckRe
     let title = f.title.as_deref();
 
     let latest = store.latest_snapshot_meta(u.id)?;
-    if let Some((_, latest_hash)) = &latest {
-        if *latest_hash == f.hash {
-            store.update_check_ok(u.id, title, now, next)?;
-            return Ok(CheckResult::Unchanged);
-        }
+    if let Some((_, latest_hash)) = &latest
+        && *latest_hash == f.hash
+    {
+        store.update_check_ok(u.id, title, now, next)?;
+        return Ok(CheckResult::Unchanged);
     }
 
     let snap_id = store.insert_snapshot(u.id, &f.hash, &f.text, now)?;

@@ -171,8 +171,8 @@ async fn main() -> Result<()> {
             }
             let unseen = store.unseen_url_ids()?;
             println!(
-                "{:>4}  {:2} {:8} {:>12} {:>12}  {}",
-                "ID", "", "EVERY", "LAST CHECK", "NEXT CHECK", "TITLE / URL"
+                "{:>4}  {:2} {:8} {:>12} {:>12}  TITLE / URL",
+                "ID", "", "EVERY", "LAST CHECK", "NEXT CHECK"
             );
             for u in &urls {
                 let marker = if unseen.contains(&u.id) {
@@ -192,10 +192,10 @@ async fn main() -> Result<()> {
                     None => u.url.clone(),
                 };
                 println!("{:>4}  {:2} {:8} {:>12} {:>12}  {}", u.id, marker, u.schedule.to_string(), last, next, label);
-                if u.status == "error" {
-                    if let Some(msg) = &u.error_message {
-                        println!("{:44}└ error: {}", "", msg);
-                    }
+                if u.status == "error"
+                    && let Some(msg) = &u.error_message
+                {
+                    println!("{:44}└ error: {}", "", msg);
                 }
             }
             let n = store.count_unseen()?;

@@ -9,6 +9,19 @@ inbox and a once-a-day notification nags you until you've marked them seen.
 Ships as a macOS menu-bar app and a CLI/daemon for servers. Both share one Rust engine
 and one SQLite file. [BACKLOG.md](BACKLOG.md) lists what's designed but not yet built.
 
+## Install
+
+[**Download for macOS (Apple Silicon)**](https://github.com/boat-builder/litecter/releases/latest/download/Litecter-macos-arm64.dmg)
+— Developer ID signed and notarized, so it opens with no Gatekeeper prompt. Intel Macs
+are not supported. Checksums are on the [releases page](https://github.com/boat-builder/litecter/releases/latest).
+
+You also need a Chromium-family browser installed (Chrome, Chromium, Edge or Brave) —
+Litecter drives it headlessly to render each page. There is no in-app updater yet;
+re-download to update.
+
+Every push to `main` cuts a signed release — see
+[docs/release-pipeline.md](docs/release-pipeline.md).
+
 ## Layout
 
 ```

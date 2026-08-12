@@ -3,3 +3,7 @@ node_modules/
 app/dist/
 app/src-tauri/gen/
 .DS_Store
+
+# Apple signing credentials for local signed builds — see docs/release-pipeline.md.
+# CI does not use this file; it reads the same values from GitHub Actions secrets.
+.env

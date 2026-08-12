@@ -187,10 +187,10 @@ impl Store {
     /// Resolve a CLI target: "#7"/"7" as an id, otherwise by URL
     /// (with an implied https:// if the scheme was omitted).
     pub fn resolve_url(&self, target: &str) -> Result<Option<UrlRow>> {
-        if let Ok(id) = target.trim_start_matches('#').parse::<i64>() {
-            if let Some(u) = self.url_by_id(id)? {
-                return Ok(Some(u));
-            }
+        if let Ok(id) = target.trim_start_matches('#').parse::<i64>()
+            && let Some(u) = self.url_by_id(id)?
+        {
+            return Ok(Some(u));
         }
         let by_url = |url: &str| -> Result<Option<UrlRow>> {
             Ok(self
