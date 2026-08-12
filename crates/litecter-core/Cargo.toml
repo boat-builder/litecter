@@ -1,0 +1,20 @@
+[package]
+name = "litecter-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.6"
+chromiumoxide = "0.9.1"
+chrono = "0.4.45"
+fastrand = "2.5.0"
+futures = "0.3.34"
+regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+similar = "3.1.2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "time", "macros", "signal"] }
+url = "2.5.8"
+zstd = "0.13.3"
