@@ -106,10 +106,10 @@ impl Renderer {
             if let Some(fail) = &req.failure_text {
                 return Err(anyhow!("navigation failed: {fail}"));
             }
-            if let Some(resp) = &req.response {
-                if resp.status >= 400 {
-                    return Err(anyhow!("HTTP {}", resp.status));
-                }
+            if let Some(resp) = &req.response
+                && resp.status >= 400
+            {
+                return Err(anyhow!("HTTP {}", resp.status));
             }
         }
 
