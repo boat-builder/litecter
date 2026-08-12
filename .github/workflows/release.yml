@@ -1,0 +1,280 @@
+name: release
+
+# Every push to main cuts a release:
+#   1. `bump` computes the next version — a patch bump of the latest `v*` tag.
+#      To cut a minor/major instead, raise `version` in
+#      app/src-tauri/tauri.conf.json in your commit; a file version higher than
+#      the latest tag is used verbatim. The version is stamped into
+#      app/package.json, app/package-lock.json, app/src-tauri/tauri.conf.json,
+#      app/src-tauri/Cargo.toml and the workspace Cargo.lock, committed back to
+#      main and tagged vX.Y.Z.
+#   2. `build-release` builds the Apple Silicon (arm64-only — Intel is not
+#      supported) macOS .dmg via Tauri (Developer ID signed + notarized +
+#      stapled — REQUIRED, the job fails loudly if the signing secrets are
+#      absent; there is no unsigned fallback) and publishes a GitHub Release
+#      for that tag, marked latest, so
+#        https://github.com/boat-builder/litecter/releases/latest/download/Litecter-macos-arm64.dmg
+#      always resolves to the newest build.
+#
+# The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
+# workflows from GITHUB_TOKEN pushes — so the bump cannot re-trigger this
+# workflow (the [skip ci] in its message is belt-and-braces). That is also why
+# the release builds in the SAME run instead of a separate on-tag workflow: a
+# GITHUB_TOKEN-pushed tag would not fire it.
+#
+# Signing secrets reuse the same names as the other apps on this Apple account —
+# copy the values over (GitHub secrets cannot be read back, so re-enter them
+# from the original source, not from another repo):
+#   MACOS_CERTIFICATE, MACOS_CERTIFICATE_PWD, MACOS_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+# (no KEYCHAIN_PWD needed — Tauri creates its own ephemeral keychain).
+#
+# There is deliberately no auto-updater yet: no TAURI_SIGNING_* secrets, no
+# createUpdaterArtifacts, no latest.json. Users update by downloading the DMG.
+# When the updater lands, see docs/release-pipeline.md for what to add back.
+#
+# workflow_dispatch cuts a release manually (same bump + build path).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push bump commit + tag, create the GitHub Release
+
+# Serialize runs: a second push during a release waits, then checks out the
+# just-bumped main head, so its version bump lands on top (never non-fast-forward).
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------- version bump
+  bump:
+    name: Bump version + tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main         # branch head (not the trigger SHA) — see concurrency note
+          fetch-depth: 0    # need all tags to find the latest release
+
+      - name: Compute next version
+        id: v
+        run: |
+          set -euo pipefail
+          file_v="$(jq -r .version app/src-tauri/tauri.conf.json)"
+          last_tag="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [ -z "$last_tag" ]; then
+            next="$file_v"   # first release ships the committed version as-is
+          else
+            tag_v="${last_tag#v}"
+            IFS=. read -r maj min pat <<<"$tag_v"
+            next="$maj.$min.$((pat+1))"
+            # A manually raised file version (minor/major bump) beats the auto patch bump.
+            if [ "$file_v" != "$tag_v" ] && \
+               [ "$(printf '%s\n%s\n' "$file_v" "$tag_v" | sort -V | tail -n1)" = "$file_v" ]; then
+              next="$file_v"
+            fi
+          fi
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            echo "::error::tag v$next already exists — delete it or raise the version in app/src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$next (previous tag: ${last_tag:-none})"
+
+      - name: Stamp version into package.json, package-lock.json, tauri.conf.json, Cargo.toml, Cargo.lock
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Rewrite only the first "version" line, so the surrounding JSON/TOML
+          # formatting is untouched (jq would reflow the whole file). awk rather
+          # than `sed -i "0,/re/s//../"`: sed's 0-address is a GNU extension that
+          # silently no-ops on BSD sed, so the awk version is the one that can be
+          # tested on a Mac and behave identically here.
+          stamp_first() {   # file, regex, replacement-line-builder
+            awk -v ver="$VERSION" -v re="$2" -v tmpl="$3" '
+              !stamped && $0 ~ re { sub(re, tmpl ver "\""); stamped = 1 }
+              { print }
+            ' "$1" > "$1.tmp"
+            mv "$1.tmp" "$1"
+          }
+          stamp_first app/package.json               '"version": *"[^"]+"'  '"version": "'
+          stamp_first app/src-tauri/tauri.conf.json  '"version": *"[^"]+"'  '"version": "'
+          stamp_first app/src-tauri/Cargo.toml       '^version = "[^"]+"'   'version = "'
+          # package-lock.json carries the root version twice (top level and
+          # packages."") and is machine-generated, so it gets jq addressing both
+          # keys by name — npm writes the same 2-space indent jq does.
+          jq --indent 2 --arg v "$VERSION" '.version = $v | .packages."".version = $v' \
+            app/package-lock.json > package-lock.tmp
+          mv package-lock.tmp app/package-lock.json
+          # sanity: every stamped file now agrees
+          for f in "$(jq -r .version app/package.json)" \
+                   "$(jq -r .version app/src-tauri/tauri.conf.json)" \
+                   "$(jq -r .version app/package-lock.json)" \
+                   "$(jq -r '.packages."".version' app/package-lock.json)"; do
+            [ "$f" = "$VERSION" ] || { echo "::error::version stamp failed"; exit 1; }
+          done
+          grep -q "^version = \"$VERSION\"$" app/src-tauri/Cargo.toml || { echo "::error::Cargo.toml stamp failed"; exit 1; }
+          # Cargo.lock is the workspace lock at the repo root (app/src-tauri is a
+          # workspace member). Only the litecter-app package entry moves — the
+          # library crates keep their own versions. Version is the line after name.
+          awk -v ver="$VERSION" '
+            prev == "name = \"litecter-app\"" && /^version = / { $0 = "version = \"" ver "\"" }
+            { prev = $0; print }
+          ' Cargo.lock > Cargo.lock.tmp
+          mv Cargo.lock.tmp Cargo.lock
+          grep -A1 'name = "litecter-app"' Cargo.lock | grep -q "version = \"$VERSION\"" \
+            || { echo "::error::Cargo.lock stamp failed"; exit 1; }
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Files already at $VERSION (first release) — tagging without a commit"
+          else
+            git commit -m "chore: release v$VERSION [skip ci]"
+          fi
+          git tag "v$VERSION"
+          git push origin HEAD:main "refs/tags/v$VERSION"
+
+  # ---------------------------------------------- macOS build + GitHub Release
+  build-release:
+    name: Build .dmg (arm64, signed + notarized) and release
+    needs: bump
+    # macos-15 is the arm64 runner (Xcode 16.x default). Building on arm64
+    # natively keeps the aarch64-apple-darwin target a first-class host build.
+    runs-on: macos-15
+    # GitHub's hard per-job ceiling. Apple occasionally holds a submission far
+    # longer than any CI job can wait — if that happens the job fails; recover
+    # with "Re-run failed jobs", which reuses the bump job's tag and simply
+    # resubmits.
+    timeout-minutes: 360
+    env:
+      VERSION: ${{ needs.bump.outputs.version }}
+    steps:
+      # No unsigned fallback: fail here, before the expensive build, if any
+      # signing/notarization secret is missing.
+      - name: Require signing secrets
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          [ -n "$MACOS_CERTIFICATE" ]      || missing="$missing MACOS_CERTIFICATE"
+          [ -n "$MACOS_CERTIFICATE_PWD" ]  || missing="$missing MACOS_CERTIFICATE_PWD"
+          [ -n "$MACOS_SIGNING_IDENTITY" ] || missing="$missing MACOS_SIGNING_IDENTITY"
+          [ -n "$APPLE_ID" ]               || missing="$missing APPLE_ID"
+          [ -n "$APPLE_PASSWORD" ]         || missing="$missing APPLE_PASSWORD"
+          [ -n "$APPLE_TEAM_ID" ]          || missing="$missing APPLE_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing signing secrets:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.tag }}   # the exact stamped commit
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      # app/src-tauri is a member of the root workspace, so the lockfile and the
+      # target/ directory both live at the repo root — cache the root workspace.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '.'
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      # Tauri's bundler handles the whole signing story from env vars: imports
+      # the cert into an ephemeral keychain, codesigns with hardened runtime,
+      # notarizes the .app with notarytool, staples it, then signs the .dmg.
+      - name: Build, sign and notarize
+        working-directory: app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri build -- --target aarch64-apple-darwin
+
+      # Assert the ticket is really attached — catches Tauri silently skipping
+      # notarization (e.g. an env var it didn't recognize).
+      - name: Verify signature + notarization
+        run: |
+          set -euo pipefail
+          APP="target/aarch64-apple-darwin/release/bundle/macos/Litecter.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
+          # Gatekeeper's own verdict, exactly as a first-launch user's Mac sees it.
+          spctl -a -vvv -t exec "$APP"
+          # arm64-only by design — fail if an x86_64 slice sneaks back in.
+          for bin in "$APP"/Contents/MacOS/*; do
+            archs="$(lipo -archs "$bin")"
+            [ "$archs" = "arm64" ] || { echo "::error::$bin is not arm64-only: $archs"; exit 1; }
+          done
+
+      # Notarize + staple the DMG itself too (Tauri only notarizes the .app),
+      # so the downloaded .dmg passes Gatekeeper offline as well.
+      - name: Stage, notarize and staple the DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Dedicated staging dir — must NOT be app/dist/, which is the Vite
+          # frontend build output (npm run build writes there); publishing that
+          # would sweep index.html and the web assets into the release.
+          mkdir -p release-assets
+          DMG="release-assets/Litecter-${VERSION}-macos-arm64.dmg"
+          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg "$DMG"
+          xcrun notarytool submit "$DMG" --wait \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          # Version-less alias (copied AFTER stapling) for a stable
+          # releases/latest/download/ URL, plus a checksum manifest.
+          cp "$DMG" release-assets/Litecter-macos-arm64.dmg
+          (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
+          ls -la release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump.outputs.tag }}
+          files: release-assets/*
+          make_latest: 'true'
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
+
+            Litecter renders pages with a headless browser, so it needs Google Chrome, Chromium, Edge or Brave installed. Point `LITECTER_CHROME` at a binary to override the auto-detected one.

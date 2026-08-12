@@ -1,0 +1,62 @@
+name: ci
+
+# PR gate for what the release build can't catch until after merge — the
+# release workflow runs on main, so anything it would fail on has already
+# landed by the time it complains.
+#
+# The Rust job deliberately builds only litecter-core and litecter (the CLI),
+# not litecter-app: the Tauri crate needs webkit2gtk and friends on Linux,
+# which would mean apt-installing a GUI stack to typecheck a desktop app that
+# only ships for macOS. The macOS release build covers litecter-app, and the
+# two library crates are where the logic actually lives.
+#
+# cargo fmt is not enforced — the tree is not rustfmt-clean and reformatting it
+# is a separate decision from adding CI. Run `cargo fmt --all` and add a
+# `cargo fmt --all -- --check` step here if you want that gate.
+
+on:
+  pull_request:
+
+jobs:
+  rust:
+    name: Clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '.'
+
+      - name: Clippy
+        run: cargo clippy -p litecter-core -p litecter --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p litecter-core -p litecter
+
+  frontend:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      # svelte-check rather than `tsc --noEmit`: tsconfig includes src/**/*.svelte
+      # and tsc cannot parse those, so tsc alone would only cover api.ts/main.ts.
+      - name: Typecheck
+        working-directory: app
+        run: npm run check
