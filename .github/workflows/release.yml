@@ -263,7 +263,13 @@ jobs:
           # Version-less alias (copied AFTER stapling) for a stable
           # releases/latest/download/ URL, plus a checksum manifest.
           cp "$DMG" release-assets/Litecter-macos-arm64.dmg
-          (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
+          # The backup backend users deploy to their own Cloudflare account.
+          # Shipped verbatim, not bundled or minified: people are asked to read
+          # it before pasting it in. The app compiles the same file in and reads
+          # WORKER_VERSION back out of it, so these two cannot drift apart.
+          # docs/self-hosted-backend.md explains why the URL is `latest`.
+          cp worker/src/index.js release-assets/litecter-worker.js
+          (cd release-assets && shasum -a 256 *.dmg *.js > SHA256SUMS)
           ls -la release-assets
 
       - name: Publish GitHub Release
@@ -278,3 +284,5 @@ jobs:
             **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
 
             Litecter renders pages with a headless browser, so it needs Google Chrome, Chromium, Edge or Brave installed. Point `LITECTER_CHROME` at a binary to override the auto-detected one.
+
+            `litecter-worker.js` is the optional backup backend you deploy to your own Cloudflare account — one file, no dependencies, free plan. Settings → Backup walks you through it, or see [worker/README.md](https://github.com/boat-builder/litecter/blob/main/worker/README.md).

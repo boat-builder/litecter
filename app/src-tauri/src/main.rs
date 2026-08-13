@@ -15,13 +15,201 @@ use tauri_plugin_notification::NotificationExt as _;
 use tokio::sync::Mutex;
 
 use litecter_core::{
-    differ, fetch_rendered, persist_check, ChangeItem, Renderer, Schedule, Store, UrlRow,
+    differ, fetch_rendered, persist_check, sync, ChangeItem, Renderer, Schedule, Store, UrlRow,
 };
 
 type SharedStore = Arc<Mutex<Store>>;
 
 struct AppState {
     store: SharedStore,
+    sync: SyncScheduler,
+    worker: WorkerState,
+}
+
+/// Coordinates when a sync runs.
+///
+/// Two triggers, for two different failure modes. The daily tick is the backup
+/// guarantee. The debounced push is what keeps the window of loss small: adding
+/// thirty URLs and losing the disk an hour later shouldn't cost you all thirty,
+/// and a 60-second debounce collapses that whole burst into one upload.
+#[derive(Clone)]
+struct SyncScheduler {
+    state: Arc<Mutex<SyncState>>,
+    running: Arc<Mutex<()>>,
+}
+
+#[derive(Default)]
+struct SyncState {
+    /// When the watch list first changed since the last successful sync.
+    dirty_since: Option<i64>,
+    /// Don't attempt again before this — exponential backoff after a failure,
+    /// so a laptop that is simply offline doesn't retry every minute all day.
+    not_before: i64,
+    failures: u32,
+}
+
+/// A burst of edits collapses into one upload this long after the first of them.
+const SYNC_DEBOUNCE_SECS: i64 = 60;
+/// The floor: sync at least this often even if nothing changed locally, so a
+/// second machine's edits still arrive.
+const SYNC_INTERVAL_SECS: i64 = 24 * 60 * 60;
+/// Backoff after a failed attempt: 5 min × 2^failures, capped at an hour.
+const SYNC_BACKOFF_BASE_SECS: i64 = 300;
+const SYNC_BACKOFF_CAP_SECS: i64 = 3600;
+
+impl SyncScheduler {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SyncState::default())),
+            running: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Note that the watch list changed. Only the *first* edit in a burst sets
+    /// the timer, so a bulk import doesn't keep pushing its own deadline back.
+    async fn mark_dirty(&self, now: i64) {
+        let mut state = self.state.lock().await;
+        if state.dirty_since.is_none() {
+            state.dirty_since = Some(now);
+        }
+    }
+
+    /// Whether to sync now. Clears the debounce flag, so a caller that takes a
+    /// `true` must report the outcome back via [`succeeded`](Self::succeeded)
+    /// or [`failed`](Self::failed) — otherwise a pending edit is dropped.
+    async fn take_if_due(&self, now: i64, last_sync: Option<i64>) -> bool {
+        let mut state = self.state.lock().await;
+        if now < state.not_before {
+            return false;
+        }
+        let debounced = state.dirty_since.is_some_and(|since| now - since >= SYNC_DEBOUNCE_SECS);
+        let overdue = last_sync.is_none_or(|t| now - t >= SYNC_INTERVAL_SECS);
+        if debounced || overdue {
+            state.dirty_since = None;
+            return true;
+        }
+        false
+    }
+
+    async fn succeeded(&self) {
+        let mut state = self.state.lock().await;
+        state.failures = 0;
+        state.not_before = 0;
+    }
+
+    /// Re-arm the edit that just failed to upload. Without this, one transient
+    /// network error would silently postpone a backup until the next daily
+    /// tick — exactly the window this whole feature exists to close.
+    async fn failed(&self, now: i64) {
+        let mut state = self.state.lock().await;
+        state.failures = state.failures.saturating_add(1);
+        let delay = SYNC_BACKOFF_BASE_SECS
+            .saturating_mul(1i64 << state.failures.min(4))
+            .min(SYNC_BACKOFF_CAP_SECS);
+        state.not_before = now + delay;
+        if state.dirty_since.is_none() {
+            state.dirty_since = Some(now);
+        }
+    }
+}
+
+/// Run one sync round.
+///
+/// The store lock is taken three times, each for a short synchronous stretch,
+/// and never across an HTTP call — otherwise the window would freeze for the
+/// length of the request. `sync::drive` sequences the network; this closure
+/// owns all the database work.
+async fn sync_once(store: &SharedStore, scheduler: &SyncScheduler) -> Result<sync::SyncReport, String> {
+    // A slow sync must not stack up behind the next tick. Contention is not a
+    // failure, so it returns before anything is recorded against the backup's
+    // health — otherwise pressing "Sync now" mid-tick would look like an outage.
+    let _guard = scheduler.running.try_lock().map_err(|_| "a sync is already running".to_string())?;
+    let now = now_ts();
+
+    let outcome = async {
+        let session = {
+            let s = store.lock().await;
+            sync::SyncSession::begin(&s)?
+        };
+        sync::drive(&session, |remote| async move {
+            let s = store.lock().await;
+            let local = sync::SyncDoc::build(&s, now)?;
+            let merged = litecter_core::sync::doc::merge(local, remote);
+            let stats = litecter_core::sync::doc::apply(&s, &merged, now)?;
+            Ok((merged, stats))
+        })
+        .await
+    }
+    .await;
+
+    let s = store.lock().await;
+    match outcome {
+        Ok((report, etag)) => {
+            let _ = sync::finish(&s, &etag, now);
+            Ok(report)
+        }
+        Err(e) => {
+            let message = format!("{e:#}");
+            let _ = sync::record_failure(&s, &message, now);
+            Err(message)
+        }
+    }
+}
+
+/// The background trigger: daily, or 60 s after the watch list last changed.
+/// Failures are logged and dropped — a backup that can't reach the network must
+/// never interrupt checking or take the app down.
+async fn maybe_sync(app: &AppHandle, store: &SharedStore, scheduler: &SyncScheduler) {
+    let (configured, last) = {
+        let s = store.lock().await;
+        (
+            sync::is_configured(&s).unwrap_or(false),
+            sync::last_synced_at(&s).ok().flatten(),
+        )
+    };
+    if !configured || !scheduler.take_if_due(now_ts(), last).await {
+        return;
+    }
+    match sync_once(store, scheduler).await {
+        Ok(report) => {
+            scheduler.succeeded().await;
+            if report.stats.added > 0 || report.stats.removed > 0 || report.stats.pendings_restored > 0
+            {
+                update_tray(app, store).await;
+            }
+            // Always refresh: the health banner has to clear itself once the
+            // backup recovers, not just when the watch list moved.
+            let _ = app.emit("litecter://refresh", ());
+        }
+        Err(e) => {
+            scheduler.failed(now_ts()).await;
+            eprintln!("sync failed (will retry): {e}");
+            notify_if_backup_is_stuck(app, store).await;
+            let _ = app.emit("litecter://refresh", ());
+        }
+    }
+}
+
+/// The last line of defence: a user who never opens the window would otherwise
+/// never learn their backup stopped working.
+///
+/// Fires at most **once per outage**, and only after a full day of failure —
+/// the same restraint the daily digest applies to changes. See the note in
+/// `litecter_core::scheduler::tick` before adding any other notification.
+async fn notify_if_backup_is_stuck(app: &AppHandle, store: &SharedStore) {
+    let notice = {
+        let s = store.lock().await;
+        sync::take_failure_notice(&s, now_ts()).ok().flatten()
+    };
+    let Some(reason) = notice else { return };
+    let _ = app
+        .notification()
+        .builder()
+        .title("Litecter backup is failing")
+        .body(format!(
+            "Your watch list hasn't backed up in over a day — {reason}"
+        ))
+        .show();
 }
 
 fn now_ts() -> i64 {
@@ -168,16 +356,17 @@ async fn maybe_digest(app: &AppHandle, store: &SharedStore) {
             .body(format!("{unseen} page(s) have unreviewed changes"))
             .show();
     }
-    let _ = store.lock().await.set_setting("last_digest_date", &today);
+    let _ = store.lock().await.set_setting("last_digest_date", &today, now_ts());
 }
 
-async fn scheduler_loop(app: AppHandle, store: SharedStore) {
+async fn scheduler_loop(app: AppHandle, store: SharedStore, scheduler: SyncScheduler) {
     loop {
         let due = { store.lock().await.due_urls(now_ts()).unwrap_or_default() };
         if !due.is_empty() {
             run_batch(&app, &store, due).await;
         }
         maybe_digest(&app, &store).await;
+        maybe_sync(&app, &store, &scheduler).await;
         update_tray(&app, &store).await;
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
@@ -198,24 +387,31 @@ async fn add_urls(
     every: String,
 ) -> Result<Vec<String>, String> {
     let schedule: Schedule = every.parse().map_err(|e: anyhow::Error| e.to_string())?;
-    let s = state.store.lock().await;
     let now = now_ts();
     let mut errors = Vec::new();
-    for raw in urls {
-        let url = normalize_input_url(&raw);
-        if let Err(e) = s.add_url(&url, schedule, None, now) {
-            errors.push(format!("{url}: {e:#}"));
+    {
+        let s = state.store.lock().await;
+        for raw in urls {
+            let url = normalize_input_url(&raw);
+            if let Err(e) = s.add_url(&url, schedule, None, now) {
+                errors.push(format!("{url}: {e:#}"));
+            }
         }
     }
+    state.sync.mark_dirty(now).await;
     Ok(errors)
 }
 
 #[tauri::command]
 async fn remove_urls(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
-    let s = state.store.lock().await;
-    for id in ids {
-        s.remove_url(id).map_err(|e| e.to_string())?;
+    let now = now_ts();
+    {
+        let s = state.store.lock().await;
+        for id in ids {
+            s.remove_url(id, now).map_err(|e| e.to_string())?;
+        }
     }
+    state.sync.mark_dirty(now).await;
     Ok(())
 }
 
@@ -226,11 +422,14 @@ async fn set_schedule(
     every: String,
 ) -> Result<(), String> {
     let schedule: Schedule = every.parse().map_err(|e: anyhow::Error| e.to_string())?;
-    let s = state.store.lock().await;
     let now = now_ts();
-    for id in ids {
-        s.set_schedule(id, schedule, now).map_err(|e| e.to_string())?;
+    {
+        let s = state.store.lock().await;
+        for id in ids {
+            s.set_schedule(id, schedule, now).map_err(|e| e.to_string())?;
+        }
     }
+    state.sync.mark_dirty(now).await;
     Ok(())
 }
 
@@ -297,6 +496,269 @@ async fn mark_all_seen(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     Ok(())
 }
 
+// ---- sync commands -------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct SyncStatus {
+    configured: bool,
+    /// Only ever sent to the local webview, and only to be displayed once so
+    /// the user can save it. It is not shown unless they ask.
+    key: Option<String>,
+    /// The whole connection as one paste, for a second machine.
+    link: Option<String>,
+    /// What the backend's `SYNC_TOKEN` secret has to be set to.
+    token: Option<String>,
+    last_synced_at: Option<i64>,
+    watched: usize,
+    endpoint: Option<String>,
+    /// Set while the backup is broken — drives the banner in the main window.
+    failing_since: Option<i64>,
+    last_error: Option<String>,
+    /// The worker version this build ships. `None` means the constant could not
+    /// be read, which disables the update nag rather than inventing a number.
+    bundled_worker_version: Option<u32>,
+    /// What the last probe found. `None` while unknown — see [`WorkerState`].
+    deployed_worker_version: Option<u32>,
+    worker_outdated: bool,
+    worker_needs_token_secret: bool,
+}
+
+/// The last answer the backend gave about its own version.
+///
+/// Cached because it is a network call and the UI polls status every 30
+/// seconds. `None` means *unknown*, which is deliberately not the same as
+/// outdated: a laptop on a plane must not be told to redeploy a worker that was
+/// already current.
+#[derive(Clone, Default)]
+struct WorkerState(Arc<Mutex<Option<sync::WorkerCheck>>>);
+
+#[tauri::command]
+async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let worker = state.worker.0.lock().await.clone();
+    let s = state.store.lock().await;
+    let health = sync::health(&s).map_err(|e| e.to_string())?;
+    let key = sync::load_key(&s).map_err(|e| e.to_string())?;
+    Ok(SyncStatus {
+        configured: sync::is_configured(&s).map_err(|e| e.to_string())?,
+        key: key.as_ref().map(|k| k.encode()),
+        link: sync::link_code(&s).map_err(|e| e.to_string())?,
+        token: key.as_ref().map(|k| k.auth_token()),
+        last_synced_at: sync::last_synced_at(&s).map_err(|e| e.to_string())?,
+        watched: s.list_urls().map_err(|e| e.to_string())?.len(),
+        endpoint: sync::endpoint(&s).map_err(|e| e.to_string())?,
+        failing_since: health.failing_since,
+        last_error: health.last_error,
+        bundled_worker_version: sync::worker::bundled_version(),
+        deployed_worker_version: worker.as_ref().map(|w| w.deployed),
+        worker_outdated: worker.as_ref().is_some_and(|w| w.is_outdated()),
+        worker_needs_token_secret: worker.as_ref().is_some_and(|w| w.needs_token_secret()),
+    })
+}
+
+/// The backend's source, for the "copy worker code" button. The same bytes the
+/// release attaches and the same bytes we parse the version out of.
+#[tauri::command]
+fn get_worker_source() -> &'static str {
+    sync::worker::SOURCE
+}
+
+#[derive(serde::Serialize)]
+struct Instructions {
+    text: String,
+    /// Shown at the copy button. Setup's agent and terminal routes carry the
+    /// token; nothing in the update flow does, because a same-name redeploy
+    /// leaves the secret untouched.
+    carries_secret: bool,
+}
+
+/// Generate one route's hand-off. `kind` is "setup" or "update".
+#[tauri::command]
+async fn get_instructions(
+    state: State<'_, AppState>,
+    kind: String,
+    route: String,
+) -> Result<Instructions, String> {
+    let route = sync::setup::Route::parse(&route).ok_or("unknown route")?;
+    let updating = kind == "update";
+
+    let (token, endpoint, needs_secret) = {
+        let s = state.store.lock().await;
+        // Setup needs the token before the backend exists, so this is where the
+        // key is born rather than on the first sync.
+        let key = if updating {
+            sync::load_key(&s).map_err(|e| e.to_string())?
+        } else {
+            Some(sync::ensure_key(&s, now_ts()).map_err(|e| e.to_string())?)
+        };
+        (
+            key.map(|k| k.auth_token()).unwrap_or_default(),
+            sync::endpoint(&s).map_err(|e| e.to_string())?,
+            state.worker.0.lock().await.as_ref().is_some_and(|w| w.needs_token_secret()),
+        )
+    };
+
+    let text = if updating {
+        let deployment = sync::setup::Deployment::from_endpoint(&endpoint.unwrap_or_default());
+        sync::setup::update(route, &deployment, needs_secret)
+    } else {
+        sync::setup::setup(route, &token)
+    };
+    Ok(Instructions { text, carries_secret: !updating && route.setup_carries_secret() })
+}
+
+/// Point this machine at a backend, after proving it answers.
+///
+/// Verification is the whole reason this is a round trip rather than a save:
+/// Litecter cannot see the user's Cloudflare account, so checking from this side
+/// is the only confirmation that means anything. "The instructions said it
+/// worked" is not evidence.
+#[tauri::command]
+async fn connect_backend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    let endpoint = sync::link::normalize_endpoint(&url).map_err(|e| format!("{e:#}"))?;
+    let connection = {
+        let s = state.store.lock().await;
+        sync::Connection {
+            endpoint: endpoint.clone(),
+            key: sync::ensure_key(&s, now_ts()).map_err(|e| e.to_string())?,
+        }
+    };
+
+    connection.verify().await.map_err(|e| format!("{e:#}"))?;
+
+    {
+        let s = state.store.lock().await;
+        sync::save_endpoint(&s, &endpoint, now_ts()).map_err(|e| e.to_string())?;
+    }
+    refresh_worker_check(&state.store, &state.worker).await;
+    let _ = app.emit("litecter://refresh", ());
+    Ok(())
+}
+
+/// Adopt a connection from another machine — the combined paste, or a bare key.
+#[tauri::command]
+async fn adopt_link(app: AppHandle, state: State<'_, AppState>, code: String) -> Result<(), String> {
+    let parsed = sync::link::parse(&code).map_err(|e| format!("{e:#}"))?;
+
+    // Check before saving when the paste carried an address, so a typo is
+    // rejected here rather than surfacing as a broken backup tomorrow.
+    if let Some(endpoint) = &parsed.endpoint {
+        sync::Connection { endpoint: endpoint.clone(), key: parsed.key }
+            .verify()
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+    }
+
+    {
+        let s = state.store.lock().await;
+        sync::adopt_link(&s, &code, now_ts()).map_err(|e| format!("{e:#}"))?;
+    }
+    refresh_worker_check(&state.store, &state.worker).await;
+    let _ = app.emit("litecter://refresh", ());
+    Ok(())
+}
+
+/// Re-probe the backend's version. This is what "Check again" calls.
+#[tauri::command]
+async fn check_worker(state: State<'_, AppState>) -> Result<Option<u32>, String> {
+    let connection = {
+        let s = state.store.lock().await;
+        sync::Connection::load(&s).map_err(|e| e.to_string())?
+    };
+    let Some(connection) = connection else { return Ok(None) };
+    let check = connection.probe().await.map_err(|e| format!("{e:#}"))?;
+    let deployed = check.deployed;
+    *state.worker.0.lock().await = Some(check);
+    Ok(Some(deployed))
+}
+
+/// Erase the backup from the user's own bucket.
+///
+/// Step one of removing a backend: R2 will not delete a bucket that still holds
+/// objects, and nothing but this app holds the token that can reach this one.
+#[tauri::command]
+async fn erase_backup(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = {
+        let s = state.store.lock().await;
+        sync::Connection::load(&s).map_err(|e| e.to_string())?
+    };
+    connection
+        .ok_or("backup is not set up on this machine")?
+        .erase()
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+
+    // The stored ETag describes a document that no longer exists; keeping it
+    // would make the next push fail a precondition about nothing.
+    {
+        let s = state.store.lock().await;
+        sync::disconnect(&s, now_ts()).map_err(|e| e.to_string())?;
+    }
+    *state.worker.0.lock().await = None;
+    let _ = app.emit("litecter://refresh", ());
+    Ok(())
+}
+
+/// Stop syncing without touching the backup or the watch list.
+#[tauri::command]
+async fn disconnect_backend(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let s = state.store.lock().await;
+        sync::disconnect(&s, now_ts()).map_err(|e| e.to_string())?;
+    }
+    *state.worker.0.lock().await = None;
+    let _ = app.emit("litecter://refresh", ());
+    Ok(())
+}
+
+/// Probe on launch and after a connection changes. Failures are swallowed on
+/// purpose — an unreachable backend leaves the version unknown, and unknown
+/// must never read as outdated.
+async fn refresh_worker_check(store: &SharedStore, worker: &WorkerState) {
+    let connection = {
+        let s = store.lock().await;
+        sync::Connection::load(&s).ok().flatten()
+    };
+    let Some(connection) = connection else {
+        *worker.0.lock().await = None;
+        return;
+    };
+    if let Ok(check) = connection.probe().await {
+        *worker.0.lock().await = Some(check);
+    }
+}
+
+#[derive(serde::Serialize)]
+struct SyncOutcome {
+    urls: usize,
+    added: usize,
+    removed: usize,
+    pendings_restored: usize,
+    uploaded_bytes: usize,
+    diffs_dropped_for_size: usize,
+}
+
+#[tauri::command]
+async fn sync_now_cmd(app: AppHandle, state: State<'_, AppState>) -> Result<SyncOutcome, String> {
+    // A manual sync deliberately ignores the backoff window — the user asking
+    // is better evidence that the network is back than any timer.
+    let report = sync_once(&state.store, &state.sync).await?;
+    state.sync.succeeded().await;
+    let _ = app.emit("litecter://refresh", ());
+    update_tray(&app, &state.store).await;
+    Ok(SyncOutcome {
+        urls: report.urls_in_document,
+        added: report.stats.added,
+        removed: report.stats.removed,
+        pendings_restored: report.stats.pendings_restored,
+        uploaded_bytes: report.uploaded_bytes,
+        diffs_dropped_for_size: report.diffs_dropped_for_size,
+    })
+}
+
 #[derive(serde::Serialize)]
 struct Prefs {
     digest_hour: u32,
@@ -331,7 +793,7 @@ async fn set_prefs(
         .store
         .lock()
         .await
-        .set_setting("digest_hour", &digest_hour.to_string())
+        .set_setting("digest_hour", &digest_hour.to_string(), now_ts())
         .map_err(|e| e.to_string())?;
     let launcher = app.autolaunch();
     if autostart {
@@ -359,10 +821,16 @@ fn main() {
             // First run: launch-at-login on by default (user can toggle it off).
             if store.get_setting("autostart_initialized")?.is_none() {
                 let _ = app.autolaunch().enable();
-                store.set_setting("autostart_initialized", "1")?;
+                store.set_setting("autostart_initialized", "1", now_ts())?;
             }
             let store: SharedStore = Arc::new(Mutex::new(store));
-            app.manage(AppState { store: store.clone() });
+            let sync_scheduler = SyncScheduler::new();
+            let worker_state = WorkerState::default();
+            app.manage(AppState {
+                store: store.clone(),
+                sync: sync_scheduler.clone(),
+                worker: worker_state.clone(),
+            });
 
             let open = MenuItem::with_id(app, "open", "Open Litecter", true, None::<&str>)?;
             let add = MenuItem::with_id(app, "add", "Add link…", true, None::<&str>)?;
@@ -390,7 +858,17 @@ fn main() {
                 show_main(app.handle());
             }
 
-            tauri::async_runtime::spawn(scheduler_loop(app.handle().clone(), store));
+            tauri::async_runtime::spawn(scheduler_loop(
+                app.handle().clone(),
+                store.clone(),
+                sync_scheduler,
+            ));
+
+            // One probe per launch, off the startup path. Nothing waits on it:
+            // the window opens and works whether or not the backend answers.
+            tauri::async_runtime::spawn(async move {
+                refresh_worker_check(&store, &worker_state).await;
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -410,7 +888,16 @@ fn main() {
             mark_seen,
             mark_all_seen,
             get_prefs,
-            set_prefs
+            set_prefs,
+            get_sync_status,
+            get_worker_source,
+            get_instructions,
+            connect_backend,
+            adopt_link,
+            check_worker,
+            erase_backup,
+            disconnect_backend,
+            sync_now_cmd
         ])
         .run(tauri::generate_context!())
         .expect("error while running Litecter");

@@ -60,3 +60,36 @@ jobs:
       - name: Typecheck
         working-directory: app
         run: npm run check
+
+  worker:
+    name: Typecheck sync worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      # The Worker ships as plain JavaScript so that what a user pastes into
+      # their own Cloudflare account is byte-for-byte what lives here. Types
+      # come from JSDoc under checkJs, so a broken deploy is still caught.
+      - name: Typecheck
+        working-directory: worker
+        run: npx tsc --noEmit
+
+      # The app parses WORKER_VERSION out of this file to decide whether a
+      # user's deployment is behind. A rename or a non-numeric value would
+      # silently disable that check rather than fail anything, so it is asserted
+      # here as well as in litecter-core's tests.
+      - name: Worker declares a parseable version
+        run: |
+          grep -Eq '^const WORKER_VERSION = [0-9]+;$' worker/src/index.js \
+            || { echo "worker/src/index.js must declare 'const WORKER_VERSION = <n>;'" >&2; exit 1; }

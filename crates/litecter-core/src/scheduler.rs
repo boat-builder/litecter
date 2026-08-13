@@ -111,7 +111,7 @@ async fn tick<N: Fn(&str, &str)>(store: &Store, opts: &DaemonOptions, notify: &N
                     &format!("{unseen} page(s) have unreviewed changes — litecter changes"),
                 );
             }
-            store.set_setting("last_digest_date", &today)?;
+            store.set_setting("last_digest_date", &today, now_ts())?;
         }
     }
     Ok(())

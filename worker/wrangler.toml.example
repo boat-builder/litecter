@@ -1,0 +1,29 @@
+# Copy to wrangler.toml and deploy. The real file is gitignored because it ends
+# up carrying your account id, and because your deployment is yours.
+#
+#   cp wrangler.toml.example wrangler.toml
+#   npx wrangler r2 bucket create litecter-sync
+#   npx wrangler deploy
+#   npx wrangler secret put SYNC_TOKEN     # paste the token Litecter shows you
+#
+# Deploy prints the URL. Paste that into Litecter → Settings → Backup.
+
+name = "litecter-sync"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# The free *.workers.dev hostname is the whole endpoint — there is nothing to
+# configure and no domain to own. Set a custom domain below only if you want one.
+workers_dev = true
+
+# Where the sealed document lives. Create the bucket first; wrangler will not.
+[[r2_buckets]]
+binding = "SYNC"
+bucket_name = "litecter-sync"
+
+# Optional: serve from your own domain instead. The zone must already be in this
+# Cloudflare account; the DNS record is then managed for you.
+#
+# [[routes]]
+# pattern = "sync.example.com"
+# custom_domain = true
