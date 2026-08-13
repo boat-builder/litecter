@@ -804,10 +804,32 @@ async fn set_prefs(
     Ok(())
 }
 
+/// Opens an http(s) URL in the default browser — the updater's "Download
+/// manually…" escape hatch. macOS-only, like the rest of the app; a
+/// cross-platform port would use xdg-open / `start`.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("refusing to open non-http url: {url}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("open {url}: {e}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("open_external is only supported on macOS".to_string())
+    }
+}
+
 // ---- app ----------------------------------------------------------------------
 
 fn main() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
@@ -815,7 +837,21 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+
+    // In-app auto-update. The updater plugin has no mobile implementation, so
+    // it is desktop-gated here to match the target block in Cargo.toml; the
+    // process plugin is what relaunches the app once the bundle is swapped —
+    // without it the update installs but the user stays on the old version
+    // until they quit by hand. See docs/auto-update.md.
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .setup(|app| {
             let store = Store::open(&db_path())?;
             // First run: launch-at-login on by default (user can toggle it off).
@@ -897,7 +933,8 @@ fn main() {
             check_worker,
             erase_backup,
             disconnect_backend,
-            sync_now_cmd
+            sync_now_cmd,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("error while running Litecter");

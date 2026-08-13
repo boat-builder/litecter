@@ -97,6 +97,7 @@ export const api = {
   eraseBackup: () => invoke<void>('erase_backup'),
   disconnectBackend: () => invoke<void>('disconnect_backend'),
   syncNow: () => invoke<SyncOutcome>('sync_now_cmd'),
+  openExternal: (url: string) => invoke<void>('open_external', { url }),
 };
 
 /** Summarise a completed sync in one line of plain language. */

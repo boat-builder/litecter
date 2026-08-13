@@ -6,6 +6,7 @@
   import DiffPanel from './DiffPanel.svelte';
   import Library from './Library.svelte';
   import Prefs from './Prefs.svelte';
+  import { startUpdateWatch, updateAvailable } from './updater';
 
   let tab: 'changes' | 'library' = 'changes';
   let urls: UrlRow[] = [];
@@ -29,6 +30,16 @@
   // when you look, never in the way. Unknown (an unreachable backend) is not
   // outdated, so this stays dark on a plane.
   $: backendBehind = sync?.worker_outdated ?? false;
+  // One dot for both kinds of "something is a version behind" — the app itself
+  // and the backup backend. Two competing dots on one gear would teach the user
+  // nothing except to ignore dots.
+  $: gearHint = $updateAvailable
+    ? backendBehind
+      ? 'Settings — app and backup backend updates available'
+      : 'Settings — update available'
+    : backendBehind
+      ? 'Settings — a newer backup backend is available'
+      : 'Settings';
 
   function flash(msg: string) {
     toast = msg;
@@ -136,10 +147,12 @@
     const unlisten = listen('litecter://refresh', refresh);
     const unlistenAdd = listen('litecter://focus-add', focusAdd);
     const poll = setInterval(refresh, 30_000);
+    const stopUpdateWatch = startUpdateWatch();
     return () => {
       unlisten.then((f) => f());
       unlistenAdd.then((f) => f());
       clearInterval(poll);
+      stopUpdateWatch();
     };
   });
 </script>
@@ -176,12 +189,16 @@
         <button type="button" class="ghost" on:click={() => (pendingBulk = [])}>clear</button>
       {/if}
     </form>
+    <!-- A pending update is surfaced passively — a dot on the gear, never a
+         modal. The user finds it when they happen to look. -->
     <button
       class="ghost gear"
-      title={backendBehind ? 'Settings — a newer backup backend is available' : 'Settings'}
+      class:pending={$updateAvailable || backendBehind}
+      title={gearHint}
+      aria-label={gearHint}
       on:click={() => (showPrefs = true)}
     >
-      ⚙{#if backendBehind}<span class="dot" aria-hidden="true"></span>{/if}
+      ⚙
     </button>
   </header>
 
@@ -359,14 +376,16 @@
   .gear {
     position: relative;
   }
-  .dot {
+  .gear.pending::after {
+    content: '';
     position: absolute;
     top: 4px;
     right: 6px;
     width: 7px;
     height: 7px;
-    border-radius: 50%;
-    background: var(--warn);
+    border-radius: 99px;
+    background: var(--accent);
+    border: 1.5px solid var(--panel);
   }
   .alert {
     display: flex;

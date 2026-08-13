@@ -1,0 +1,22 @@
+# litecter.cc — Cloudflare Worker serving the home page.
+#
+#   cd web && wrangler deploy
+#
+# `custom_domain = true` makes Cloudflare own the DNS record and certificate for
+# the hostname, so there is nothing to create by hand in the dashboard.
+name = "litecter-site"
+main = "worker.js"
+account_id = "d4d6d6ce6b4ed772df8e20081cf28903"
+compatibility_date = "2024-09-23"
+workers_dev = true
+
+# index.html is imported by worker.js as a string rather than being inlined in
+# the JS, so it stays a real, editable HTML file.
+rules = [
+  { type = "Text", globs = ["**/*.html"], fallthrough = false }
+]
+
+routes = [
+  { pattern = "litecter.cc", custom_domain = true },
+  { pattern = "www.litecter.cc", custom_domain = true }
+]

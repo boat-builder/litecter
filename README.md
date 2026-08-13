@@ -16,11 +16,16 @@ and one SQLite file. [BACKLOG.md](BACKLOG.md) lists what's designed but not yet 
 are not supported. Checksums are on the [releases page](https://github.com/boat-builder/litecter/releases/latest).
 
 You also need a Chromium-family browser installed (Chrome, Chromium, Edge or Brave) —
-Litecter drives it headlessly to render each page. There is no in-app updater yet;
-re-download to update.
+Litecter drives it headlessly to render each page.
+
+You only download once: Litecter updates itself. It checks for a new release
+quietly in the background, and **Settings → Updates** offers a single
+*Update & Restart* button that downloads, verifies the signature, swaps the app
+and relaunches.
 
 Every push to `main` cuts a signed release — see
-[docs/release-pipeline.md](docs/release-pipeline.md).
+[docs/release-pipeline.md](docs/release-pipeline.md) for the CI side and
+[docs/auto-update.md](docs/auto-update.md) for the updater.
 
 ## Layout
 
@@ -28,8 +33,8 @@ Every push to `main` cuts a signed release — see
 crates/litecter-core/   engine — store, browser renderer, differ, scheduler, sync (no UI deps)
 crates/litecter-cli/    `litecter` binary — CLI + `litecter daemon`
 app/                    Tauri 2 + Svelte desktop app
-  src/                  frontend (Changes inbox, Library, diff panel)
-  src-tauri/            thin Rust shell — IPC commands, tray, autostart
+  src/                  frontend (Changes inbox, Library, diff panel, updater)
+  src-tauri/            thin Rust shell — IPC commands, tray, autostart, updater
 worker/                 the backup backend users deploy to their own Cloudflare account
 BACKLOG.md              designed but not built — start here for something to pick up
 ```
@@ -47,9 +52,15 @@ cargo test                         # core unit tests
 ```
 
 ```bash
-cd app && npm install && npx tauri dev    # desktop app, hot reload
-cd app && npx tauri build                 # → target/release/bundle/macos/Litecter.app
+cd app && npm install && npx tauri dev              # desktop app, hot reload
+cd app && npx tauri build -- --no-bundle            # compile only
 ```
+
+A full `npx tauri build` also bundles the updater artifact, which it refuses to
+do unsigned — it needs `TAURI_SIGNING_PRIVATE_KEY` (and its password) in the
+environment. `--no-bundle` skips that; see
+[docs/release-pipeline.md](docs/release-pipeline.md#testing-changes-to-the-pipeline)
+if you need the real bundle locally.
 
 ## CLI
 

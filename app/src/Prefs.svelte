@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { api, describeSync, relTime, type SyncStatus } from './api';
   import Backend from './Backend.svelte';
+  import { checkForUpdate, installUpdate, RELEASES_PAGE, update } from './updater';
 
   const dispatch = createEventDispatcher<{ close: void; flash: string }>();
 
@@ -16,6 +17,17 @@
   let backend: 'setup' | 'update' | null = null;
   let confirmingErase = false;
   let erasing = false;
+  // The status line under the update row: always says which version is running,
+  // so "did my update land?" never needs a trip to the releases page.
+  $: status = !$update.current
+    ? 'Checking…'
+    : $update.phase === 'available' || $update.phase === 'downloading'
+      ? `Current: v${$update.current}`
+      : $update.phase === 'installing'
+        ? 'Restarting…'
+        : $update.phase === 'error'
+          ? `v${$update.current} · Couldn't check`
+          : `v${$update.current} · Up to date`;
 
   onMount(async () => {
     try {
@@ -215,12 +227,51 @@
         <p class="error">{syncError}</p>
       {/if}
 
+    {:else}
+      <p class="loading">Loading…</p>
+    {/if}
+
+    <!-- Outside the `loaded` gate on purpose: if prefs fail to load, the user
+         must still be able to reach the update button. -->
+    <div class="section">Updates</div>
+    <div class="updates">
+      {#if $update.phase === 'available'}
+        <!-- The one click: names the version, promises the restart, and needs
+             no further confirmation. -->
+        <button class="primary wide" title={$update.notes} on:click={installUpdate}>
+          ↓ Update to v{$update.latest} &amp; Restart
+        </button>
+      {:else if $update.phase === 'downloading' || $update.phase === 'installing'}
+        <div class="progress" aria-live="polite">
+          <span>
+            {$update.phase === 'installing'
+              ? 'Installing…'
+              : `Downloading… ${Math.round($update.progress * 100)}%`}
+          </span>
+          <div class="track">
+            <div class="fill" style:width="{Math.round($update.progress * 100)}%"></div>
+          </div>
+        </div>
+      {:else}
+        <button class="wide" disabled={$update.phase === 'checking'} on:click={checkForUpdate}>
+          {$update.phase === 'checking' ? 'Checking…' : 'Check for updates'}
+        </button>
+      {/if}
+      <p class="status" title={$update.error ?? ''}>{status}</p>
+      {#if $update.phase === 'error'}
+        <!-- Auto-update will fail for someone (proxy, read-only install
+             location, disk full); a dead end is the worst outcome. -->
+        <button class="link" on:click={() => api.openExternal(RELEASES_PAGE)}>
+          Download manually…
+        </button>
+      {/if}
+    </div>
+
+    {#if loaded}
       <div class="actions">
         <button on:click={() => dispatch('close')}>Cancel</button>
         <button class="primary" on:click={save}>Save</button>
       </div>
-    {:else}
-      <p class="loading">Loading…</p>
     {/if}
   </div>
 </div>
@@ -278,6 +329,51 @@
     background: var(--panel);
     color: var(--fg);
     cursor: pointer;
+  }
+  .section {
+    margin-top: 18px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .updates {
+    padding-top: 8px;
+  }
+  .wide {
+    width: 100%;
+    text-align: center;
+  }
+  .progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 0;
+    color: var(--muted);
+  }
+  .track {
+    height: 4px;
+    border-radius: 99px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s ease-out;
+  }
+  .status {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .link {
+    border: none;
+    background: transparent;
+    padding: 2px 0;
+    color: var(--accent);
+    font-size: 12px;
   }
   .actions {
     display: flex;

@@ -1,6 +1,6 @@
 [package]
 name = "litecter-app"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 
 [build-dependencies]
@@ -11,6 +11,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-process = "2"
 litecter-core = { path = "../../crates/litecter-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,3 +20,9 @@ anyhow = "1"
 chrono = "0.4"
 url = "2"
 dirs = "6"
+
+# Per Tauri's guidance the updater plugin is desktop-gated, matching the
+# `#[cfg(desktop)]` registration in main.rs. tauri-plugin-process is a plain
+# dependency above — it is what relaunches the app after the bundle swap.
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
