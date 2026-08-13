@@ -150,9 +150,9 @@ which overrides that default for its own run — so the bump job can push its
 commit and tag regardless. (doklin releases from the same `read` default.) The
 repo setting only supplies the baseline for workflows that declare nothing.
 
-The first push to `main` after the secrets exist releases `v0.1.0`
-(the version currently committed in `tauri.conf.json`), and every push after
-that patch-bumps it.
+The Apple half of this setup is already done — `v0.1.0` and `v0.1.1` shipped
+signed and notarized. The updater half (step 2) gates only the releases cut
+after it lands.
 
 ## How a release runs
 
