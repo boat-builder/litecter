@@ -645,7 +645,9 @@ async fn sync_connect(store: &Store, url: &str, now: i64) -> Result<()> {
     print!("Checking {endpoint} … ");
     use std::io::Write;
     std::io::stdout().flush().ok();
-    let meta = sync::Connection { endpoint: endpoint.clone(), key }.verify().await?;
+    let meta = sync::Connection { endpoint: endpoint.clone(), key }
+        .verify(sync::Intent::Connecting)
+        .await?;
     println!("ok (v{}).", meta.version);
 
     sync::save_endpoint(store, &endpoint, now)?;

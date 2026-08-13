@@ -4,10 +4,21 @@
   // differ. Keeping them apart would mean maintaining two copies of a tab strip
   // and letting them drift.
   import { createEventDispatcher, onMount } from 'svelte';
-  import { api, type Instructions, type Route, type SyncStatus } from './api';
+  import {
+    api,
+    describeRestore,
+    describeSync,
+    type Instructions,
+    type Route,
+    type SyncStatus,
+  } from './api';
 
   export let mode: 'setup' | 'update';
   export let sync: SyncStatus | null = null;
+  // Which half of setup to open on. Restoring is not a fallback from deploying
+  // — it is the whole task for anyone on their second machine, and burying it
+  // under three deploy routes is how they end up deploying a second backend.
+  export let start: 'deploy' | 'restore' = 'deploy';
 
   const dispatch = createEventDispatcher<{ close: void; flash: string; changed: void }>();
 
@@ -23,8 +34,12 @@
 
   let url = '';
   let linkCode = '';
-  let linking = false;
+  let linking = mode === 'setup' && start === 'restore';
+  // A pasted key that carried no address. The key is adopted by then, so all
+  // that is left is where it backs up to.
+  let askAddress = false;
   let busy = false;
+  let restoring = false;
   let error = '';
 
   // Snapshotted when the dialog opens rather than read live. A card that
@@ -39,7 +54,11 @@
 
   onMount(async () => {
     fromVersion = sync?.deployed_worker_version ?? null;
-    await load();
+    // Deliberately not loaded on the restore path: generating setup
+    // instructions is what mints this machine's key, and a key minted here is
+    // one the paste is about to replace anyway.
+    if (linking) loading = false;
+    else await load();
   });
 
   async function load() {
@@ -72,10 +91,8 @@
     busy = true;
     error = '';
     try {
-      await api.connectBackend(url);
-      dispatch('flash', 'Backend connected — backing up now');
-      dispatch('changed');
-      dispatch('close');
+      await api.connectBackend(url, linking);
+      await firstRound();
     } catch (e) {
       error = String(e);
     } finally {
@@ -87,15 +104,52 @@
     busy = true;
     error = '';
     try {
-      await api.adoptLink(linkCode);
-      dispatch('flash', 'Connected to your other machine');
+      if (await api.adoptLink(linkCode)) {
+        await firstRound();
+        return;
+      }
+      // A bare key — what earlier versions handed out. It is adopted and this
+      // machine is still not backing up, so claiming success and closing would
+      // drop the user back at a "Set up backup" button with no idea why.
+      askAddress = true;
       dispatch('changed');
-      dispatch('close');
     } catch (e) {
       error = String(e);
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * Run the sync the user is actually waiting for, rather than leaving it to
+   * the next tick.
+   *
+   * On the restore path this is the whole point of the exercise — the moment
+   * the list comes back — and a dialog that closes on "connected" while the
+   * window stays empty for a minute reads as a failure.
+   */
+  async function firstRound() {
+    restoring = true;
+    // The connection is already saved, so Settings behind this should stop
+    // offering to set one up even if the round itself fails.
+    dispatch('changed');
+    try {
+      const outcome = await api.syncNow();
+      dispatch('flash', linking ? describeRestore(outcome) : describeSync(outcome));
+      dispatch('changed');
+      dispatch('close');
+    } catch (e) {
+      error = `Connected, but the first sync failed: ${e} — Litecter will keep retrying.`;
+    } finally {
+      restoring = false;
+    }
+  }
+
+  function backToDeploy() {
+    linking = false;
+    askAddress = false;
+    error = '';
+    if (!instructions) load();
   }
 
   async function recheck() {
@@ -121,7 +175,13 @@
 
 <div class="scrim" role="presentation" on:click={() => dispatch('close')}>
   <div class="panel" role="dialog" on:click|stopPropagation>
-    {#if mode === 'setup'}
+    {#if linking}
+      <h2>Restore an existing backup</h2>
+      <p class="lede">
+        You already deployed a backend from another machine. Nothing to deploy again — this machine
+        needs the connection string that machine holds, and it will pull your list back.
+      </p>
+    {:else if mode === 'setup'}
       <h2>Set up backup</h2>
       <p class="lede">
         Litecter runs no sync service. You deploy a small backend — one file, no dependencies — to
@@ -137,67 +197,116 @@
       </p>
     {/if}
 
-    <div class="tabs" role="tablist">
-      {#each ROUTES as r}
-        <button
-          role="tab"
-          class:active={route === r.id}
-          aria-selected={route === r.id}
-          on:click={() => pick(r.id)}
-        >
-          {r.label}
-          <small>{r.blurb}</small>
-        </button>
-      {/each}
-    </div>
+    {#if linking}
+      <div class="body">
+        <p class="label">On the machine that already backs up:</p>
+        <p class="step">Settings → Backup → <em>Show connection for another machine…</em></p>
+        <p class="note">Or <code>litecter sync link</code>, if that one only runs the CLI.</p>
+        <ul class="what">
+          <li>Your watch list, its schedules and filters, and your digest hour come back.</li>
+          <li>Anything you hadn't reviewed comes back too, with the text its diff needs.</li>
+          <li>Snapshot history stays behind. Restored pages check straight away to rebuild it.</li>
+        </ul>
+        <p class="note">
+          Both machines then back up to the same place and merge — this is not a hand-off, and the
+          other machine keeps working exactly as it did.
+        </p>
+      </div>
+    {:else}
+      <div class="tabs" role="tablist">
+        {#each ROUTES as r}
+          <button
+            role="tab"
+            class:active={route === r.id}
+            aria-selected={route === r.id}
+            on:click={() => pick(r.id)}
+          >
+            {r.label}
+            <small>{r.blurb}</small>
+          </button>
+        {/each}
+      </div>
 
-    <div class="body">
-      {#if loading}
-        <p class="muted">Loading…</p>
-      {:else}
-        {#if route === 'browser'}
-          <div class="inline">
-            <button class="primary" on:click={copyWorker}>Copy worker code</button>
-            {#if mode === 'setup' && sync?.token}
-              <button on:click={() => copy(sync.token ?? '', 'Token')}>Copy token</button>
-            {/if}
-          </div>
-          {#if mode === 'setup'}
-            <p class="note">
-              The token is this machine's password to its own backup. It goes in the Worker as a
-              secret named <code>SYNC_TOKEN</code>, and nowhere else.
-            </p>
-          {/if}
+      <div class="body">
+        {#if loading}
+          <p class="muted">Loading…</p>
         {:else}
-          <div class="inline">
-            <button class="primary" on:click={() => copy(instructions?.text ?? '', 'Instructions')}>
-              {route === 'agent' ? 'Copy prompt' : 'Copy commands'}
-            </button>
-            {#if instructions?.carries_secret}
-              <span class="secret">⚠ contains your token — paste it only into your own tools</span>
-            {:else}
-              <span class="muted small">No secret in this text.</span>
+          {#if route === 'browser'}
+            <div class="inline">
+              <button class="primary" on:click={copyWorker}>Copy worker code</button>
+              {#if mode === 'setup' && sync?.token}
+                <button on:click={() => copy(sync.token ?? '', 'Token')}>Copy token</button>
+              {/if}
+            </div>
+            {#if mode === 'setup'}
+              <p class="note">
+                The token is this machine's password to its own backup. It goes in the Worker as a
+                secret named <code>SYNC_TOKEN</code>, and nowhere else.
+              </p>
             {/if}
-          </div>
-        {/if}
+          {:else}
+            <div class="inline">
+              <button
+                class="primary"
+                on:click={() => copy(instructions?.text ?? '', 'Instructions')}
+              >
+                {route === 'agent' ? 'Copy prompt' : 'Copy commands'}
+              </button>
+              {#if instructions?.carries_secret}
+                <span class="secret">⚠ contains your token — paste it only into your own tools</span>
+              {:else}
+                <span class="muted small">No secret in this text.</span>
+              {/if}
+            </div>
+          {/if}
 
-        <pre>{instructions?.text ?? ''}</pre>
-      {/if}
-    </div>
+          <pre>{instructions?.text ?? ''}</pre>
+        {/if}
+      </div>
+    {/if}
 
     {#if mode === 'setup'}
       <div class="foot">
-        {#if linking}
+        {#if linking && askAddress}
+          <p class="note">
+            That was a key on its own — an older version of Litecter handed those out. It's adopted;
+            all that's missing is where it backs up to.
+          </p>
+          <label class="field">
+            <span>The address of your backend</span>
+            <input
+              bind:value={url}
+              placeholder="https://litecter-sync.you.workers.dev"
+              spellcheck="false"
+              on:keydown={(e) => e.key === 'Enter' && url.trim() && !busy && connect()}
+            />
+          </label>
+          <div class="inline">
+            <button class="primary" on:click={connect} disabled={busy || !url.trim()}>
+              {restoring ? 'Restoring…' : busy ? 'Checking…' : 'Restore'}
+            </button>
+            <button on:click={backToDeploy} disabled={busy}>Set up a new backend instead</button>
+          </div>
+        {:else if linking}
           <label class="field">
             <span>Paste the connection string from your other machine</span>
-            <input bind:value={linkCode} placeholder="KEY@https://…" spellcheck="false" />
+            <input
+              bind:value={linkCode}
+              placeholder="KEY@https://…"
+              spellcheck="false"
+              on:keydown={(e) => e.key === 'Enter' && linkCode.trim() && !busy && adopt()}
+            />
           </label>
           <div class="inline">
             <button class="primary" on:click={adopt} disabled={busy || !linkCode.trim()}>
-              {busy ? 'Checking…' : 'Connect'}
+              {restoring ? 'Restoring…' : busy ? 'Checking…' : 'Restore'}
             </button>
-            <button on:click={() => (linking = false)}>Back</button>
+            <button on:click={backToDeploy} disabled={busy}>Set up a new backend instead</button>
           </div>
+          <p class="note">
+            The half before the <code>@</code> is your sync key. It is the only thing that can
+            decrypt the backup, so treat this string like a password.
+          </p>
         {:else}
           <label class="field">
             <span>Then paste the Worker's URL here</span>
@@ -205,14 +314,16 @@
               bind:value={url}
               placeholder="https://litecter-sync.you.workers.dev"
               spellcheck="false"
-              on:keydown={(e) => e.key === 'Enter' && url.trim() && connect()}
+              on:keydown={(e) => e.key === 'Enter' && url.trim() && !busy && connect()}
             />
           </label>
           <div class="inline">
             <button class="primary" on:click={connect} disabled={busy || !url.trim()}>
-              {busy ? 'Checking…' : 'Connect'}
+              {restoring ? 'Backing up…' : busy ? 'Checking…' : 'Connect'}
             </button>
-            <button on:click={() => (linking = true)}>I already set one up elsewhere</button>
+            <button on:click={() => (linking = true)} disabled={busy}>
+              Restore an existing backup
+            </button>
           </div>
           <p class="note">
             Litecter checks the address answers before saving it — it can't see your Cloudflare
@@ -402,6 +513,24 @@
     font-size: 12px;
     margin: 10px 0 0;
     line-height: 1.5;
+  }
+  .label {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .step {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .what {
+    margin: 14px 0 0;
+    padding-left: 18px;
+    color: var(--muted);
+    line-height: 1.6;
   }
   .muted {
     color: var(--muted);

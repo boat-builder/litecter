@@ -29,7 +29,7 @@ pub mod worker;
 
 use anyhow::{Context, Result};
 
-pub use client::{SyncClient, WorkerMeta};
+pub use client::{Intent, SyncClient, WorkerMeta};
 pub use doc::{ApplyStats, SyncDoc};
 pub use key::SyncKey;
 pub use worker::WorkerCheck;
@@ -182,8 +182,12 @@ impl Connection {
     }
 
     /// Prove a connection works before saving it. Setup ends here.
-    pub async fn verify(&self) -> Result<WorkerMeta> {
-        self.client()?.verify().await
+    ///
+    /// The intent only changes what a rejected token says, but that message is
+    /// the difference between a restore and a stranded backup — see
+    /// [`client::Intent`].
+    pub async fn verify(&self, intent: Intent) -> Result<WorkerMeta> {
+        self.client()?.verify(intent).await
     }
 
     /// Erase the backup itself. Step one of removing a backend, because the
@@ -588,6 +592,19 @@ mod tests {
             load_key(&b).unwrap().unwrap().encode(),
             load_key(&a).unwrap().unwrap().encode(),
         );
+    }
+
+    #[test]
+    fn a_bare_key_paste_is_not_a_working_connection() {
+        // Older versions handed out the key alone, so someone will paste one.
+        // It has to adopt — the key is the irreplaceable half — but the machine
+        // is not backing up until an address arrives, and anything that reports
+        // otherwise sends the user away believing they are safe.
+        let b = store();
+        adopt_link(&b, &SyncKey::generate().unwrap().encode(), 2000).unwrap();
+
+        assert!(load_key(&b).unwrap().is_some());
+        assert!(!is_configured(&b).unwrap());
     }
 
     #[test]

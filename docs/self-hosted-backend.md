@@ -31,6 +31,8 @@ flowchart TD
     REL --> DEP[deploy: worker + bucket + SYNC_TOKEN]
     INC --> DEP
     DEP --> CONN[app verifies the URL + token<br/>then saves]
+    LINK["a later machine deploys nothing:<br/>paste key@endpoint instead"] --> CONN
+    CONN --> FIRST[first round runs now — a backup,<br/>or a restore that says what came back]
   end
   subgraph later[The user, every later release]
     CONN --> PROBE["app probes GET /v1/meta on launch"]
@@ -245,6 +247,8 @@ credentials live (Litecter's `settings` table).
 | A working backend answers 503 after an update | A pre-versioning deployment has no `SYNC_TOKEN` | `needs_token_secret()` adds the extra step to all three routes |
 | A frontend-only fix never reaches deployments | No API change, so no version bump | Bump for invisible changes too — the version *is* the rollout |
 | Setup succeeds but nothing works | Trusted "done" | Verify from the app before saving, and again on **Check again** |
+| A second machine deploys a *second* backend | Restoring was a footer link under three deploy routes | *Restore an existing backup…* sits beside *Set up backup*, and skips the routes entirely |
+| A user follows a 401 into stranding their own backup | One message for a code that means two things | `Intent` splits it: connecting is pointed at restore first, adopting is told its paste is wrong |
 
 ## The agent prompt, generically
 

@@ -612,11 +612,17 @@ async fn get_instructions(
 /// Litecter cannot see the user's Cloudflare account, so checking from this side
 /// is the only confirmation that means anything. "The instructions said it
 /// worked" is not evidence.
+///
+/// `restoring` says which half of setup is calling, and only changes what a
+/// rejected token says — see [`sync::Intent`]. It is passed rather than inferred
+/// because both paths end at the same call with the same arguments; only the
+/// user's intent differs, and only they know it.
 #[tauri::command]
 async fn connect_backend(
     app: AppHandle,
     state: State<'_, AppState>,
     url: String,
+    restoring: bool,
 ) -> Result<(), String> {
     let endpoint = sync::link::normalize_endpoint(&url).map_err(|e| format!("{e:#}"))?;
     let connection = {
@@ -627,7 +633,8 @@ async fn connect_backend(
         }
     };
 
-    connection.verify().await.map_err(|e| format!("{e:#}"))?;
+    let intent = if restoring { sync::Intent::Adopting } else { sync::Intent::Connecting };
+    connection.verify(intent).await.map_err(|e| format!("{e:#}"))?;
 
     {
         let s = state.store.lock().await;
@@ -639,15 +646,24 @@ async fn connect_backend(
 }
 
 /// Adopt a connection from another machine — the combined paste, or a bare key.
+///
+/// Returns whether the paste carried a backend address as well as a key. A bare
+/// key is what earlier versions handed out, so someone will paste one: it leaves
+/// the machine holding half a connection, and the caller has to go and ask for
+/// the other half rather than report success.
 #[tauri::command]
-async fn adopt_link(app: AppHandle, state: State<'_, AppState>, code: String) -> Result<(), String> {
+async fn adopt_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<bool, String> {
     let parsed = sync::link::parse(&code).map_err(|e| format!("{e:#}"))?;
 
     // Check before saving when the paste carried an address, so a typo is
     // rejected here rather than surfacing as a broken backup tomorrow.
     if let Some(endpoint) = &parsed.endpoint {
         sync::Connection { endpoint: endpoint.clone(), key: parsed.key }
-            .verify()
+            .verify(sync::Intent::Adopting)
             .await
             .map_err(|e| format!("{e:#}"))?;
     }
@@ -658,7 +674,9 @@ async fn adopt_link(app: AppHandle, state: State<'_, AppState>, code: String) ->
     }
     refresh_worker_check(&state.store, &state.worker).await;
     let _ = app.emit("litecter://refresh", ());
-    Ok(())
+
+    let s = state.store.lock().await;
+    sync::is_configured(&s).map_err(|e| e.to_string())
 }
 
 /// Re-probe the backend's version. This is what "Check again" calls.
