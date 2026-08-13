@@ -9,7 +9,13 @@ use crate::checker::{check_one, CheckResult};
 use crate::renderer::Renderer;
 use crate::store::Store;
 
-const TICK: Duration = Duration::from_secs(60);
+/// How often we ask "what's due?". This is the resolution of the whole
+/// scheduler, not a precision knob: a URL is checked at the first tick at or
+/// after its `next_check_at`, so every check runs up to one tick late. Ten
+/// minutes is deliberate — the shortest schedule is hourly, an idle tick costs a
+/// few SQLite reads, and a background app should wake as rarely as it can get
+/// away with. Lowering it buys punctuality nobody watching a web page can use.
+const TICK: Duration = Duration::from_secs(600);
 const PER_HOST_GAP: Duration = Duration::from_secs(10);
 
 pub struct DaemonOptions {
@@ -46,6 +52,8 @@ where
         TICK.as_secs(),
         opts.digest_hour
     );
+    // The digest fires on the first tick at or after `digest_hour`, so it lands
+    // within one tick of the hour rather than on it. That is fine for a nag.
     loop {
         if let Err(e) = tick(store, &opts, &notify).await {
             eprintln!("tick failed: {e:#}");

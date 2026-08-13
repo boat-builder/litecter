@@ -10,16 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Litecter",
-        "width": 1020,
-        "height": 700,
-        "minWidth": 720,
-        "minHeight": 480,
-        "visible": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

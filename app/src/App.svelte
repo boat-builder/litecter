@@ -146,12 +146,26 @@
     refresh();
     const unlisten = listen('litecter://refresh', refresh);
     const unlistenAdd = listen('litecter://focus-add', focusAdd);
-    const poll = setInterval(refresh, 30_000);
+    // The window may have been built *by* the tray's "Add link", in which case
+    // nothing was listening when that fired — the request waited for us here.
+    void api.takeFocusAdd().then((wanted) => wanted && focusAdd());
+    // A backstop for a dropped `litecter://refresh`, so it only has to run while
+    // someone is looking. Polling an occluded window is two IPC round-trips and
+    // a re-render every 30s to repaint pixels nobody can see.
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, 30_000);
+    // …and coming back to the window shouldn't mean up to 30s of stale inbox.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     const stopUpdateWatch = startUpdateWatch();
     return () => {
       unlisten.then((f) => f());
       unlistenAdd.then((f) => f());
       clearInterval(poll);
+      document.removeEventListener('visibilitychange', onVisible);
       stopUpdateWatch();
     };
   });

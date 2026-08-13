@@ -80,6 +80,8 @@ export const api = {
   removeUrls: (ids: number[]) => invoke<void>('remove_urls', { ids }),
   setSchedule: (ids: number[], every: string) => invoke<void>('set_schedule', { ids, every }),
   checkNow: (ids: number[] | null) => invoke<void>('check_now', { ids }),
+  /** Did the tray's "Add link" open this window? Consumed by the read. */
+  takeFocusAdd: () => invoke<boolean>('take_focus_add'),
   listChanges: (unseenOnly: boolean) => invoke<ChangeItem[]>('list_changes', { unseenOnly }),
   getDiff: (changeId: number) => invoke<string>('get_diff', { changeId }),
   markSeen: (changeIds: number[]) => invoke<void>('mark_seen', { changeIds }),
