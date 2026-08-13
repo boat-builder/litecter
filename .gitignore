@@ -2,6 +2,12 @@
 node_modules/
 app/dist/
 app/src-tauri/gen/
+worker/.wrangler/
+# Each user's backend deployment is their own — the tracked file is
+# worker/wrangler.toml.example. See docs/self-hosted-backend.md.
+worker/wrangler.toml
+# Local secrets for `wrangler dev`.
+worker/.dev.vars
 .DS_Store
 
 # Apple signing credentials for local signed builds — see docs/release-pipeline.md.

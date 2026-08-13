@@ -30,11 +30,12 @@ Every push to `main` cuts a signed release — see
 ## Layout
 
 ```
-crates/litecter-core/   engine — store, browser renderer, differ, scheduler (no UI deps)
+crates/litecter-core/   engine — store, browser renderer, differ, scheduler, sync (no UI deps)
 crates/litecter-cli/    `litecter` binary — CLI + `litecter daemon`
 app/                    Tauri 2 + Svelte desktop app
   src/                  frontend (Changes inbox, Library, diff panel, updater)
   src-tauri/            thin Rust shell — IPC commands, tray, autostart, updater
+worker/                 the backup backend users deploy to their own Cloudflare account
 BACKLOG.md              designed but not built — start here for something to pick up
 ```
 
@@ -72,6 +73,11 @@ litecter changes                                  # the inbox (* = unreviewed)
 litecter diff 3                                   # diff since you last reviewed
 litecter seen 3                                   # or: litecter seen --all
 litecter daemon --digest-hour 9                   # scheduler loop + daily digest
+litecter sync setup                               # deploy your own backup backend
+litecter sync connect <worker url>                # point this machine at it
+litecter sync                                     # back up / restore
+litecter sync link                                # one paste to set up a second machine
+litecter export --out list.json                   # or move it by hand
 ```
 
 `--json` on `list` and `changes` for scripting.
@@ -89,6 +95,14 @@ litecter daemon --digest-hour 9                   # scheduler loop + daily diges
   Marking seen advances `urls.last_seen_snapshot_id`.
 - **Storage.** SQLite (WAL) with zstd-compressed text snapshots, last 10 kept per URL plus
   anything a change row still references.
+- **Backup is opt-in, encrypted, and yours.** Litecter runs no sync service: you deploy a
+  small Worker to your own Cloudflare account — one file, no dependencies, free plan — and
+  the app walks you through it in a browser, via an AI agent, or in a terminal. The watch
+  list, your settings and anything still unreviewed go to your R2 bucket; snapshots stay
+  local because a check regenerates them. The payload is sealed on your machine with a key
+  the backend never sees, so a lost disk costs you nothing and nobody else holds your list.
+  See [docs/sync.md](docs/sync.md) for the data model and
+  [docs/self-hosted-backend.md](docs/self-hosted-backend.md) for the deploy flow.
 
 Database: `~/Library/Application Support/litecter/litecter.db` (macOS) or
 `$XDG_DATA_HOME/litecter/litecter.db` (Linux). Override with `LITECTER_DB` — handy for
@@ -128,5 +142,5 @@ WantedBy=default.target
 ## Not built yet
 
 Resource blocking during checks, list virtualization, FTS5 search, `j/k` navigation,
-snapshot-history compare, `export`/`import`, pause, and UI editing of per-URL ignore
-filters — see [BACKLOG.md](BACKLOG.md), which has the reasoning and an approach for each.
+snapshot-history compare, pause, and UI editing of per-URL ignore filters — see
+[BACKLOG.md](BACKLOG.md), which has the reasoning and an approach for each.

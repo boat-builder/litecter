@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    // The worker ships as plain JavaScript so that what you paste into the
+    // dashboard is byte-for-byte what lives in this repo. Types come from JSDoc
+    // instead, so CI still catches a broken deploy.
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": ["src/**/*.js"]
+}

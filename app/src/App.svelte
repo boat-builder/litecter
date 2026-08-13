@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { api, type ChangeItem, type UrlRow } from './api';
+  import { api, relTime, type ChangeItem, type SyncStatus, type UrlRow } from './api';
   import ChangesList from './ChangesList.svelte';
   import DiffPanel from './DiffPanel.svelte';
   import Library from './Library.svelte';
@@ -21,8 +21,25 @@
   let toastTimer: ReturnType<typeof setTimeout>;
   let addInput: HTMLInputElement;
   let library: Library;
+  let sync: SyncStatus | null = null;
+  let retryingSync = false;
 
   $: unseen = changes.filter((c) => !c.seen_at).length;
+  $: backupFailing = sync?.configured && sync.failing_since !== null;
+  // Behind is not broken, so this is a dot rather than a banner: noticeable
+  // when you look, never in the way. Unknown (an unreachable backend) is not
+  // outdated, so this stays dark on a plane.
+  $: backendBehind = sync?.worker_outdated ?? false;
+  // One dot for both kinds of "something is a version behind" — the app itself
+  // and the backup backend. Two competing dots on one gear would teach the user
+  // nothing except to ignore dots.
+  $: gearHint = $updateAvailable
+    ? backendBehind
+      ? 'Settings — app and backup backend updates available'
+      : 'Settings — update available'
+    : backendBehind
+      ? 'Settings — a newer backup backend is available'
+      : 'Settings';
 
   function flash(msg: string) {
     toast = msg;
@@ -32,9 +49,26 @@
 
   async function refresh() {
     try {
-      [urls, changes] = await Promise.all([api.listUrls(), api.listChanges(false)]);
+      [urls, changes, sync] = await Promise.all([
+        api.listUrls(),
+        api.listChanges(false),
+        api.getSyncStatus(),
+      ]);
     } catch (e) {
       flash(String(e));
+    }
+  }
+
+  async function retrySync() {
+    retryingSync = true;
+    try {
+      await api.syncNow();
+      flash('Backup is working again');
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      retryingSync = false;
+      await refresh();
     }
   }
 
@@ -159,14 +193,30 @@
          modal. The user finds it when they happen to look. -->
     <button
       class="ghost gear"
-      class:pending={$updateAvailable}
-      title={$updateAvailable ? 'Settings — update available' : 'Settings'}
-      aria-label={$updateAvailable ? 'Settings — update available' : 'Settings'}
+      class:pending={$updateAvailable || backendBehind}
+      title={gearHint}
+      aria-label={gearHint}
       on:click={() => (showPrefs = true)}
     >
       ⚙
     </button>
   </header>
+
+  <!-- Deliberately not dismissible. A backup you believe is running but isn't
+       is worse than no backup, so this stays until a sync actually succeeds. -->
+  {#if backupFailing && sync?.failing_since}
+    <div class="alert" role="status">
+      <span class="glyph" aria-hidden="true">⚠</span>
+      <span class="text">
+        Backup hasn't succeeded since {relTime(sync.failing_since)}.
+        {#if sync.last_error}<span class="reason">{sync.last_error}</span>{/if}
+      </span>
+      <button on:click={retrySync} disabled={retryingSync}>
+        {retryingSync ? 'Retrying…' : 'Retry'}
+      </button>
+      <button class="ghost" on:click={() => (showPrefs = true)}>Settings</button>
+    </div>
+  {/if}
 
   <nav>
     <button class:active={tab === 'changes'} on:click={() => (tab = 'changes')}>
@@ -244,6 +294,7 @@
     --red: #c73030;
     --red-bg: #fdeeee;
     --warn: #b45309;
+    --warn-bg: #fdf5e7;
   }
   @media (prefers-color-scheme: dark) {
     :global(:root) {
@@ -259,6 +310,7 @@
       --red: #f87171;
       --red-bg: #331b1b;
       --warn: #fbbf24;
+      --warn-bg: #322613;
     }
   }
 
@@ -335,6 +387,50 @@
     background: var(--accent);
     border: 1.5px solid var(--panel);
   }
+  .alert {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 14px 0;
+    padding: 9px 12px;
+    border: 1px solid var(--warn);
+    background: var(--warn-bg);
+    border-radius: 9px;
+    font-size: 13px;
+  }
+  .alert .glyph {
+    color: var(--warn);
+    font-size: 15px;
+    flex: none;
+  }
+  .alert .text {
+    flex: 1;
+    min-width: 0;
+  }
+  .alert .reason {
+    color: var(--muted);
+    display: block;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .alert button {
+    flex: none;
+    font: inherit;
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .alert button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
   nav {
     display: flex;
     gap: 4px;

@@ -141,12 +141,19 @@ CDP to avoid it.
 
 ## Operational
 
-### 11. `litecter export` / `litecter import`
-**Where:** `crates/litecter-cli/src/main.rs`.
+### 11. ~~`litecter export` / `litecter import`~~ — done
+Built alongside cloud sync: both reuse `sync::SyncDoc`, so a hand-moved file carries
+exactly what the cloud path carries and merges by the same rules. See
+[docs/sync.md](docs/sync.md).
 
-No backup path and no way to move a watch list between machines other than copying the
-SQLite file. A JSON dump of URLs and their settings (schedules, selectors, ignore
-patterns) — snapshots optional — covers backup and the Mac → server migration.
+Remaining nearby work: the sync key lives in the `settings` table, so it is only as
+protected as the database file. Moving it to the macOS Keychain is the obvious hardening
+step.
+
+The open-storage gap is closed — the backend now requires a `SYNC_TOKEN` secret that only
+the user's own key derives to, so an unknown caller gets a 401 rather than 8 MB of storage.
+Each deployment is single-tenant, which is what made that possible; see
+[docs/self-hosted-backend.md](docs/self-hosted-backend.md).
 
 ### 12. `litecter browser install`
 **Where:** `crates/litecter-core/src/renderer.rs` — `find_browser`.

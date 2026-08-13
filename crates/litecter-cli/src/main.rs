@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use litecter_core::{
-    check_one, differ, run_daemon, CheckResult, DaemonOptions, Renderer, Schedule, Store, UrlRow,
+    check_one, differ, run_daemon, sync, CheckResult, DaemonOptions, Renderer, Schedule, Store,
+    UrlRow,
 };
 
 #[derive(Parser)]
@@ -73,6 +74,65 @@ enum Cmd {
         /// Local hour (0-23) for the unreviewed-changes digest
         #[arg(long, default_value_t = 9)]
         digest_hour: u32,
+    },
+    /// Back up and restore the watch list through the cloud
+    Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
+    },
+    /// Write the watch list to a JSON file (stdout if no path given)
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Merge a JSON file from `export` into this database
+    Import { path: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Show whether sync is set up and when it last ran
+    Status,
+    /// Print what to do to deploy your own backup backend
+    Setup {
+        /// browser | agent | terminal
+        #[arg(long, default_value = "terminal")]
+        route: String,
+    },
+    /// Point this machine at a backend you deployed, after checking it answers
+    Connect {
+        /// The Worker's URL, e.g. https://litecter-sync.you.workers.dev
+        url: String,
+    },
+    /// Print one string carrying this machine's whole connection, or adopt one
+    Link {
+        /// Adopt a connection from another machine
+        #[arg(long, value_name = "CODE")]
+        set: Option<String>,
+    },
+    /// Ask your backend what version it runs and compare it with this build
+    Check,
+    /// Print what to do to move your backend to the current worker code
+    Update {
+        /// browser | agent | terminal
+        #[arg(long, default_value = "terminal")]
+        route: String,
+    },
+    /// Write the backend's source — the file you deploy — to stdout or a path
+    Worker {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Stop syncing from this machine. Leaves the watch list and the backup alone
+    Disconnect,
+    /// Print this machine's sync key — save it in a password manager
+    Key {
+        /// Adopt an existing key (from another machine) instead of printing
+        #[arg(long, value_name = "KEY")]
+        set: Option<String>,
+        /// Discard the current key and start a new document
+        #[arg(long, conflicts_with = "set")]
+        reset: bool,
     },
 }
 
@@ -211,7 +271,7 @@ async fn main() -> Result<()> {
             for t in &targets {
                 match store.resolve_url(t)? {
                     Some(u) => {
-                        store.remove_url(u.id)?;
+                        store.remove_url(u.id, now)?;
                         println!("- removed #{} {}", u.id, u.url);
                     }
                     None => eprintln!("! not watched: {t}"),
@@ -391,7 +451,317 @@ async fn main() -> Result<()> {
             };
             run_daemon(&store, DaemonOptions { digest_hour }, notify).await?;
         }
+
+        Cmd::Sync { cmd } => match cmd {
+            None => run_sync(&store, now).await?,
+            Some(SyncCmd::Status) => sync_status(&store, now).await?,
+            Some(SyncCmd::Setup { route }) => sync_setup(&store, &route, now)?,
+            Some(SyncCmd::Connect { url }) => sync_connect(&store, &url, now).await?,
+            Some(SyncCmd::Link { set }) => sync_link(&store, set, now)?,
+            Some(SyncCmd::Check) => {
+                sync_check(&store).await?;
+            }
+            Some(SyncCmd::Update { route }) => sync_update(&store, &route).await?,
+            Some(SyncCmd::Worker { out }) => match out {
+                Some(path) => {
+                    std::fs::write(&path, sync::worker::SOURCE)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!("Wrote the backend to {}", path.display());
+                }
+                None => print!("{}", sync::worker::SOURCE),
+            },
+            Some(SyncCmd::Disconnect) => {
+                sync::disconnect(&store, now)?;
+                println!("Disconnected. The watch list is untouched, and so is the backup —");
+                println!("delete that from your own Cloudflare dashboard if you want it gone.");
+            }
+            Some(SyncCmd::Key { set, reset }) => sync_key(&store, set, reset, now)?,
+        },
+
+        // Export/import reuse the sync document, so a file moved by hand
+        // carries exactly what the cloud path carries — including the
+        // unreviewed inbox — and merges by the same rules.
+        Cmd::Export { out } => {
+            let doc = sync::SyncDoc::build(&store, now)?;
+            let json = serde_json::to_string_pretty(&doc)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &json)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!("Exported {} URL(s) to {}", doc.urls.len(), path.display());
+                }
+                None => println!("{json}"),
+            }
+        }
+
+        Cmd::Import { path } => {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let incoming: sync::SyncDoc =
+                serde_json::from_str(&raw).context("that file is not a Litecter export")?;
+            let merged = sync::doc::merge(sync::SyncDoc::build(&store, now)?, incoming);
+            let stats = sync::doc::apply(&store, &merged, now)?;
+            println!(
+                "Imported — {} added, {} updated, {} removed, {} unreviewed change(s) restored.",
+                stats.added, stats.updated, stats.removed, stats.pendings_restored
+            );
+        }
     }
 
     Ok(())
+}
+
+// ---- sync ---------------------------------------------------------------------
+
+async fn run_sync(store: &Store, now: i64) -> Result<()> {
+    if !sync::is_configured(store)? {
+        bail!(
+            "backup is not set up on this machine.\n\n\
+             Litecter runs no sync service — you deploy a small backend to your own\n\
+             Cloudflare account, on the free plan, and it stays yours. Start with:\n\n    \
+             litecter sync setup\n\n\
+             Already have one on another machine?  litecter sync link --set <code>"
+        );
+    }
+
+    let report = sync::sync_now(store, now).await?;
+    let s = &report.stats;
+
+    println!(
+        "Synced {} URL(s) — {} added, {} updated, {} removed locally.",
+        report.urls_in_document, s.added, s.updated, s.removed
+    );
+    if s.pendings_restored > 0 {
+        println!("Restored {} unreviewed change(s) — litecter changes", s.pendings_restored);
+    }
+    if report.diffs_dropped_for_size > 0 {
+        println!(
+            "! {} diff(s) were too large to upload; those pages will re-baseline on their next check.",
+            report.diffs_dropped_for_size
+        );
+    }
+    if report.attempts > 1 {
+        println!("({} attempts — another device was syncing at the same time)", report.attempts);
+    }
+    println!("Uploaded {:.1} KB.", report.uploaded_bytes as f64 / 1024.0);
+    Ok(())
+}
+
+async fn sync_status(store: &Store, now: i64) -> Result<()> {
+    if !sync::is_configured(store)? {
+        if sync::load_key(store)?.is_some() {
+            // Setup got as far as generating a key and stopped. Say which half
+            // is missing rather than "not set up", which sends people back to
+            // the start of a wizard they already finished most of.
+            println!("Backup is half set up: this machine has a key but no backend to send it to.");
+            println!("Finish with:  litecter sync connect <your worker URL>");
+        } else {
+            println!("Backup is not set up. Start with:  litecter sync setup");
+        }
+        return Ok(());
+    }
+    // A failure recorded by the daemon or the desktop app has to be visible
+    // here too — the whole point is that it can't be missed — and it leads,
+    // because a stale "last synced" line reads like good news on its own.
+    let health = sync::health(store)?;
+    if let Some(since) = health.failing_since {
+        println!("⚠ Backup is failing — nothing has synced since {}", rel_time(since, now));
+        if let Some(err) = &health.last_error {
+            println!("  {err}");
+        }
+        println!("  Retry with `litecter sync`.\n");
+    }
+
+    println!("Backend:     {}", sync::endpoint(store)?.unwrap_or_default());
+    match sync::last_synced_at(store)? {
+        Some(ts) => println!("Last synced: {}", rel_time(ts, now)),
+        None => println!("Last synced: never (connected, but no sync has completed)"),
+    }
+    if health.failing_since.is_some() {
+        return Ok(());
+    }
+    let doc = sync::SyncDoc::build(store, now)?;
+    let pendings = doc.urls.iter().filter(|u| u.pending.is_some()).count();
+    println!("Would send:  {} URL(s), {pendings} unreviewed change(s)", doc.urls.len());
+
+    // Best-effort: a status command should not fail because the network is
+    // down, and an unreachable backend says nothing about its version.
+    if let Ok(check) = sync_check_quiet(store).await
+        && check.is_outdated()
+    {
+        let deployed = if check.deployed == sync::worker::PRE_VERSIONING {
+            "a version from before Litecter tracked them".to_string()
+        } else {
+            format!("v{}", check.deployed)
+        };
+        println!(
+            "\n! Your backend runs {deployed} and this build ships v{}. Everything keeps",
+            check.bundled.unwrap_or_default(),
+        );
+        println!("  working; update it when convenient:  litecter sync update");
+    }
+    println!("\nMove this connection to another machine:  litecter sync link");
+    Ok(())
+}
+
+// ---- backend setup -------------------------------------------------------------
+
+fn parse_route(raw: &str) -> Result<sync::setup::Route> {
+    sync::setup::Route::parse(raw)
+        .with_context(|| format!("`{raw}` is not a route — pick browser, agent or terminal"))
+}
+
+fn sync_setup(store: &Store, route: &str, now: i64) -> Result<()> {
+    let route = parse_route(route)?;
+    // The token has to exist before the backend can be told about it, so this
+    // is where the key is born — not on the first sync.
+    let key = sync::ensure_key(store, now)?;
+
+    println!("Litecter runs no sync service. You deploy a small backend — one file, no");
+    println!("dependencies — to your own Cloudflare account, and it stays yours. The free");
+    println!("plan covers this many times over.\n");
+
+    if route == sync::setup::Route::Browser {
+        println!("Worker source:  litecter sync worker --out {}\n", sync::worker::ASSET_NAME);
+        println!("Token for step 5 (SYNC_TOKEN):\n\n  {}\n", key.auth_token());
+    }
+    println!("{}\n", sync::setup::setup(route, &key.auth_token()));
+
+    if route.setup_carries_secret() {
+        println!("^ The text above contains this machine's token. It is the one secret here;");
+        println!("  paste it into your own shell or agent and nowhere else.\n");
+    }
+    println!("Then:  litecter sync connect <the URL it printed>");
+    print_key_banner(store)
+}
+
+async fn sync_connect(store: &Store, url: &str, now: i64) -> Result<()> {
+    let endpoint = sync::link::normalize_endpoint(url)?;
+    let key = sync::ensure_key(store, now)?;
+
+    // Verify before saving. The app cannot see the user's Cloudflare account,
+    // so proving the connection from this side is the only check that means
+    // anything — "the instructions said it worked" is not evidence.
+    print!("Checking {endpoint} … ");
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    let meta = sync::Connection { endpoint: endpoint.clone(), key }.verify().await?;
+    println!("ok (v{}).", meta.version);
+
+    sync::save_endpoint(store, &endpoint, now)?;
+    println!("Connected. Run `litecter sync` to make the first backup.");
+    Ok(())
+}
+
+fn sync_link(store: &Store, set: Option<String>, now: i64) -> Result<()> {
+    if let Some(code) = set {
+        sync::adopt_link(store, &code, now)?;
+        match sync::endpoint(store)? {
+            Some(e) => println!("Adopted. Backend: {e}\nRun `litecter sync` to pull the list."),
+            None => println!(
+                "Key adopted, but that code carried no backend address.\n\
+                 Add it with:  litecter sync connect <url>"
+            ),
+        }
+        return Ok(());
+    }
+    let code = sync::link_code(store)?
+        .context("backup is not set up on this machine — run `litecter sync setup`")?;
+    println!("\n  {code}\n");
+    println!("Paste that on the other machine:  litecter sync link --set '<code>'");
+    println!("\nIt contains this machine's sync key. Treat it like a password: it is what");
+    println!("decrypts the backup, and nobody can recover it for you.");
+    Ok(())
+}
+
+/// Probe without printing. Callers that want the failure reported should use
+/// [`sync_check`].
+async fn sync_check_quiet(store: &Store) -> Result<sync::WorkerCheck> {
+    sync::Connection::load(store)?
+        .context("backup is not set up on this machine — run `litecter sync setup`")?
+        .probe()
+        .await
+}
+
+async fn sync_check(store: &Store) -> Result<sync::WorkerCheck> {
+    let check = sync_check_quiet(store).await?;
+    let bundled = check.bundled.context("this build could not read its own worker version")?;
+    if check.deployed == sync::worker::PRE_VERSIONING {
+        println!("Your backend predates version reporting; this build ships v{bundled}.");
+    } else {
+        println!("Backend v{}, this build ships v{bundled}.", check.deployed);
+    }
+    if check.is_outdated() {
+        println!("\nBackups keep working while it is behind. Update it with:");
+        println!("  litecter sync update");
+    } else {
+        println!("Up to date.");
+    }
+    Ok(check)
+}
+
+async fn sync_update(store: &Store, route: &str) -> Result<()> {
+    let route = parse_route(route)?;
+    let endpoint = sync::endpoint(store)?
+        .context("backup is not set up on this machine — run `litecter sync setup`")?;
+    let deployment = sync::setup::Deployment::from_endpoint(&endpoint);
+
+    // Ask rather than assume: whether the extra secret step is needed depends
+    // on what is actually deployed, and getting it wrong either omits a step
+    // the user needs or adds one that confuses them.
+    let needs_token = match sync_check_quiet(store).await {
+        Ok(check) if !check.is_outdated() => {
+            println!("Your backend is already current (v{}). Nothing to do.\n", check.deployed);
+            return Ok(());
+        }
+        Ok(check) => check.needs_token_secret(),
+        Err(e) => {
+            eprintln!("! Could not reach the backend to check its version: {e:#}");
+            eprintln!("  Printing the update steps anyway.\n");
+            false
+        }
+    };
+
+    if route == sync::setup::Route::Browser {
+        println!("Worker source:  litecter sync worker --out {}\n", sync::worker::ASSET_NAME);
+    }
+    println!("{}\n", sync::setup::update(route, &deployment, needs_token));
+    println!("Then confirm it landed:  litecter sync check");
+    Ok(())
+}
+
+/// The one moment the key is worth shouting about: it is the only way back to
+/// the backup, and nothing else can recover it.
+fn print_key_banner(store: &Store) -> Result<()> {
+    let key = sync::load_key(store)?.context("no sync key configured")?;
+    println!("\n  Sync key:  {}\n", key.encode());
+    println!("Save this in your password manager. It is the only way to read the backup,");
+    println!("and nobody can recover it for you — not us, and not Cloudflare, who only");
+    println!("ever hold bytes this key encrypted.");
+    println!("\nMoving to another machine? `litecter sync link` carries this and the");
+    println!("backend address in one string.");
+    Ok(())
+}
+
+fn sync_key(store: &Store, set: Option<String>, reset: bool, now: i64) -> Result<()> {
+    if let Some(raw) = set {
+        let key = sync::SyncKey::decode(&raw).context("that does not look like a sync key")?;
+        sync::save_key(store, &key, now)?;
+        println!("Key adopted. It still needs a backend to talk to:");
+        println!("  litecter sync connect <url>");
+        return Ok(());
+    }
+    if reset {
+        let key = sync::SyncKey::generate()?;
+        sync::save_key(store, &key, now)?;
+        println!("New key generated — the previous backup is no longer readable from here.");
+        println!("Your backend also needs its SYNC_TOKEN secret replaced with the new token,");
+        println!("or every sync from here will be rejected. The new token is:\n");
+        println!("  {}\n", key.auth_token());
+        return print_key_banner(store);
+    }
+    if sync::load_key(store)?.is_none() {
+        bail!("no sync key yet — run `litecter sync setup` to create one");
+    }
+    print_key_banner(store)
 }

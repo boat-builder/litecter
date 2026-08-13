@@ -10,10 +10,12 @@ pub mod renderer;
 pub mod schedule;
 pub mod scheduler;
 pub mod store;
+pub mod sync;
 pub mod textproc;
 
 pub use checker::{check_one, fetch_rendered, persist_check, CheckResult, Fetched};
 pub use scheduler::{run_daemon, DaemonOptions};
 pub use renderer::{RenderedPage, Renderer};
 pub use schedule::Schedule;
-pub use store::{ChangeItem, Store, UrlRow};
+pub use store::{ChangeItem, Store, UrlConfig, UrlRow};
+pub use sync::{sync_now, SyncKey, SyncReport};

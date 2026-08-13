@@ -30,6 +30,50 @@ export interface Prefs {
   autostart: boolean;
 }
 
+export interface SyncStatus {
+  /** Both halves present: a key *and* a backend to send it to. */
+  configured: boolean;
+  /** Present once a key exists. Shown only when the user asks to see it. */
+  key: string | null;
+  /** Key + backend as one string, for setting up a second machine. */
+  link: string | null;
+  /** What the backend's SYNC_TOKEN secret has to be. */
+  token: string | null;
+  last_synced_at: number | null;
+  watched: number;
+  endpoint: string | null;
+  /** Set while the backup is broken; cleared as soon as one succeeds. */
+  failing_since: number | null;
+  last_error: string | null;
+  /** The worker version this build ships. */
+  bundled_worker_version: number | null;
+  /**
+   * What the last probe found, or null while unknown. Unknown is deliberately
+   * not the same as outdated — an unreachable backend must not be nagged about.
+   */
+  deployed_worker_version: number | null;
+  worker_outdated: boolean;
+  /** A backend from before the token check: updating it needs one extra step. */
+  worker_needs_token_secret: boolean;
+}
+
+export type Route = 'browser' | 'agent' | 'terminal';
+
+export interface Instructions {
+  text: string;
+  /** Whether this text contains the token. Shown at the copy button. */
+  carries_secret: boolean;
+}
+
+export interface SyncOutcome {
+  urls: number;
+  added: number;
+  removed: number;
+  pendings_restored: number;
+  uploaded_bytes: number;
+  diffs_dropped_for_size: number;
+}
+
 export const api = {
   listUrls: () => invoke<UrlRow[]>('list_urls'),
   addUrls: (urls: string[], every: string) => invoke<string[]>('add_urls', { urls, every }),
@@ -43,8 +87,28 @@ export const api = {
   getPrefs: () => invoke<Prefs>('get_prefs'),
   setPrefs: (digestHour: number, autostart: boolean) =>
     invoke<void>('set_prefs', { digestHour, autostart }),
+  getSyncStatus: () => invoke<SyncStatus>('get_sync_status'),
+  getWorkerSource: () => invoke<string>('get_worker_source'),
+  getInstructions: (kind: 'setup' | 'update', route: Route) =>
+    invoke<Instructions>('get_instructions', { kind, route }),
+  connectBackend: (url: string) => invoke<void>('connect_backend', { url }),
+  adoptLink: (code: string) => invoke<void>('adopt_link', { code }),
+  checkWorker: () => invoke<number | null>('check_worker'),
+  eraseBackup: () => invoke<void>('erase_backup'),
+  disconnectBackend: () => invoke<void>('disconnect_backend'),
+  syncNow: () => invoke<SyncOutcome>('sync_now_cmd'),
   openExternal: (url: string) => invoke<void>('open_external', { url }),
 };
+
+/** Summarise a completed sync in one line of plain language. */
+export function describeSync(o: SyncOutcome): string {
+  const parts: string[] = [];
+  if (o.added) parts.push(`${o.added} added`);
+  if (o.removed) parts.push(`${o.removed} removed`);
+  if (o.pendings_restored) parts.push(`${o.pendings_restored} change(s) restored`);
+  const detail = parts.length ? ` — ${parts.join(', ')}` : '';
+  return `Backed up ${o.urls} URL(s)${detail}`;
+}
 
 /** "2h ago" / "in 6d" / "just now" */
 export function relTime(ts: number, now = Math.floor(Date.now() / 1000)): string {
