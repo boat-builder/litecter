@@ -24,9 +24,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_ME_WITH_THE_MINISIGN_PUBLIC_KEY",
+      "endpoints": [
+        "https://github.com/boat-builder/litecter/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "macOS": {
       "minimumSystemVersion": "11.0"
     },

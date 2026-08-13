@@ -43,6 +43,7 @@ export const api = {
   getPrefs: () => invoke<Prefs>('get_prefs'),
   setPrefs: (digestHour: number, autostart: boolean) =>
     invoke<void>('set_prefs', { digestHour, autostart }),
+  openExternal: (url: string) => invoke<void>('open_external', { url }),
 };
 
 /** "2h ago" / "in 6d" / "just now" */

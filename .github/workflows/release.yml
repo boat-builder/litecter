@@ -14,7 +14,9 @@ name: release
 #      absent; there is no unsigned fallback) and publishes a GitHub Release
 #      for that tag, marked latest, so
 #        https://github.com/boat-builder/litecter/releases/latest/download/Litecter-macos-arm64.dmg
-#      always resolves to the newest build.
+#      always resolves to the newest build. The same release carries the
+#      auto-updater's artifacts — Litecter.app.tar.gz and a latest.json manifest
+#      at the matching stable URL, which is the endpoint installed copies poll.
 #
 # The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
 # workflows from GITHUB_TOKEN pushes — so the bump cannot re-trigger this
@@ -29,9 +31,14 @@ name: release
 #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
 # (no KEYCHAIN_PWD needed — Tauri creates its own ephemeral keychain).
 #
-# There is deliberately no auto-updater yet: no TAURI_SIGNING_* secrets, no
-# createUpdaterArtifacts, no latest.json. Users update by downloading the DMG.
-# When the updater lands, see docs/release-pipeline.md for what to add back.
+# Auto-updater signing is a SECOND, independent chain, and its keypair is
+# per-app — never copy doklin's:
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# generated with `npx @tauri-apps/cli signer generate`. These sign the
+# .app.tar.gz the updater plugin installs; the matching public key lives in
+# app/src-tauri/tauri.conf.json (plugins.updater.pubkey). Lose the private key
+# and every installed copy is stranded on its current version forever — back it
+# up outside CI. See docs/auto-update.md.
 #
 # workflow_dispatch cuts a release manually (same bump + build path).
 
@@ -166,7 +173,7 @@ jobs:
       VERSION: ${{ needs.bump.outputs.version }}
     steps:
       # No unsigned fallback: fail here, before the expensive build, if any
-      # signing/notarization secret is missing.
+      # signing secret is missing — Apple's chain or the updater's.
       - name: Require signing secrets
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -175,6 +182,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           missing=""
           [ -n "$MACOS_CERTIFICATE" ]      || missing="$missing MACOS_CERTIFICATE"
@@ -183,14 +192,33 @@ jobs:
           [ -n "$APPLE_ID" ]               || missing="$missing APPLE_ID"
           [ -n "$APPLE_PASSWORD" ]         || missing="$missing APPLE_PASSWORD"
           [ -n "$APPLE_TEAM_ID" ]          || missing="$missing APPLE_TEAM_ID"
+          # Updater key — per-app, generated with `tauri signer generate`.
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]          || missing="$missing TAURI_SIGNING_PRIVATE_KEY"
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ] || missing="$missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           if [ -n "$missing" ]; then
-            echo "::error::missing signing secrets:$missing"
+            echo "::error::missing signing secrets:$missing — see docs/auto-update.md"
             exit 1
           fi
 
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.bump.outputs.tag }}   # the exact stamped commit
+
+      # A placeholder pubkey would build and publish happily, then fail
+      # signature verification on every user's machine — and only at install
+      # time, long after the release looked green. Catch it here instead.
+      - name: Require a real updater public key
+        run: |
+          set -euo pipefail
+          pubkey="$(jq -r '.plugins.updater.pubkey // ""' app/src-tauri/tauri.conf.json)"
+          case "$pubkey" in
+            ''|REPLACE_ME*)
+              echo "::error::plugins.updater.pubkey in app/src-tauri/tauri.conf.json is still a placeholder."
+              echo "::error::Run 'npx @tauri-apps/cli signer generate -w ~/.tauri/litecter.key', commit the"
+              echo "::error::public key here, and set the private key as TAURI_SIGNING_PRIVATE_KEY."
+              exit 1
+              ;;
+          esac
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -223,6 +251,12 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Signs the updater artifact (.app.tar.gz -> .sig) against the pubkey
+          # baked into tauri.conf.json. Required whenever createUpdaterArtifacts
+          # is on — the build fails without it rather than shipping an unsigned
+          # artifact, which is the failure you want.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target aarch64-apple-darwin
 
       # Assert the ticket is really attached — catches Tauri silently skipping
@@ -266,6 +300,45 @@ jobs:
           (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
           ls -la release-assets
 
+      # Auto-updater artifacts: the signed .app.tar.gz the updater plugin
+      # downloads and swaps in, plus the latest.json manifest installed copies
+      # poll at
+      #   https://github.com/boat-builder/litecter/releases/latest/download/latest.json
+      # (the endpoint in tauri.conf.json). The .tar.gz + .sig come out of the
+      # build itself — createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY — and
+      # are published as-is.
+      #
+      # The manifest is fetched from the /latest/ alias but the artifact URL
+      # inside it is pinned to THIS tag, so a manifest can never hand out a
+      # mismatched bundle. Only darwin-aarch64 is listed; a platform with no
+      # entry silently never sees updates, which is how Intel stays retired.
+      - name: Stage updater artifacts + latest.json
+        env:
+          TAG: ${{ needs.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          MACOS_DIR="target/aarch64-apple-darwin/release/bundle/macos"
+          TARBALL="$(ls "$MACOS_DIR"/*.app.tar.gz | head -n1)"
+          SIG="$(cat "$MACOS_DIR"/*.app.tar.gz.sig)"
+          [ -n "$SIG" ] || { echo "::error::updater signature is empty"; exit 1; }
+          cp "$TARBALL" release-assets/Litecter.app.tar.gz
+          URL="https://github.com/boat-builder/litecter/releases/download/${TAG}/Litecter.app.tar.gz"
+          jq -n \
+            --arg v "$VERSION" \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sig "$SIG" \
+            --arg url "$URL" \
+            '{
+              version: $v,
+              notes: "Automatic update to Litecter v\($v). See the releases page for details.",
+              pub_date: $d,
+              platforms: {
+                "darwin-aarch64": { signature: $sig, url: $url }
+              }
+            }' > release-assets/latest.json
+          echo "=== latest.json ==="; cat release-assets/latest.json
+          ls -la release-assets
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -276,5 +349,7 @@ jobs:
           fail_on_unmatched_files: true
           body: |
             **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
+
+            Already running Litecter? You don't need this download — open **Settings → Updates** and click *Update & Restart*.
 
             Litecter renders pages with a headless browser, so it needs Google Chrome, Chromium, Edge or Brave installed. Point `LITECTER_CHROME` at a binary to override the auto-detected one.
