@@ -64,27 +64,56 @@ The keypair is **per app** — do not copy doklin's. A leak in one project shoul
 not become a code-execution vector in another.
 
 ```bash
-npx @tauri-apps/cli signer generate -w ~/.tauri/litecter.key
+mkdir -p ~/.tauri
+cd app && npx tauri signer generate -w ~/.tauri/litecter.key
 ```
 
-That writes `~/.tauri/litecter.key` (private) and `~/.tauri/litecter.key.pub`
-(public) and prompts for a password.
+It prompts for a password twice and writes two files, each a **single line of
+base64 with no trailing newline**:
 
-- The **public** key goes in `app/src-tauri/tauri.conf.json` under
-  `plugins.updater.pubkey`, committed. The release job refuses to build while
-  it is still the `REPLACE_ME…` placeholder.
-- The **private** key's *file contents* become the `TAURI_SIGNING_PRIVATE_KEY`
-  secret, and its password `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+| File | Contents | Goes to |
+|---|---|---|
+| `~/.tauri/litecter.key` | private key | the `TAURI_SIGNING_PRIVATE_KEY` secret, verbatim |
+| `~/.tauri/litecter.key.pub` | public key | `plugins.updater.pubkey` in `app/src-tauri/tauri.conf.json`, committed |
+
+**The password must be non-empty and must not begin or end with whitespace.**
+GitHub rejects an empty secret and the release job's `-n` check would fail on
+one; leading/trailing spaces survive in the key file but get silently eaten by
+shell tokenisation on the way into a secret, which fails the signing step with
+a confusing error.
+
+Stamp the public key in and verify it decodes before committing:
+
+```bash
+sed -i '' "s|REPLACE_ME_WITH_THE_MINISIGN_PUBLIC_KEY|$(cat ~/.tauri/litecter.key.pub)|" \
+  app/src-tauri/tauri.conf.json
+jq -r .plugins.updater.pubkey app/src-tauri/tauri.conf.json | base64 -d
+# -> untrusted comment: minisign public key: <ID>
+#    RW...
+```
+
+Then the two secrets — from a file and from stdin, never through a shell
+variable, for the tokenisation reason above:
 
 ```bash
 gh secret set TAURI_SIGNING_PRIVATE_KEY -R boat-builder/litecter < ~/.tauri/litecter.key
-gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R boat-builder/litecter
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R boat-builder/litecter   # prompts
+gh secret list -R boat-builder/litecter                                     # expect 8
 ```
 
-> **Back the private key up somewhere outside CI.** Installed copies only accept
-> artifacts signed by the pubkey they were built with, so losing it strands
-> every existing install on its current version permanently — the only recovery
-> is telling users to download a fresh DMG by hand.
+For local signed builds, the CLI also accepts a *path* instead of the key's
+contents, which avoids putting the key in a dotfile at all:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/litecter.key
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…'
+```
+
+> **Back the private key and its password up somewhere outside CI.** Installed
+> copies only accept artifacts signed by the pubkey they were built with, so
+> losing either strands every existing install on its current version
+> permanently — the only recovery is telling users to download a fresh DMG by
+> hand.
 
 ### 3. There is no step 3
 
@@ -235,10 +264,13 @@ build locally — it produces the same layout the workflow expects:
 
 ```bash
 cd app
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/litecter.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/litecter.key
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…'
 npm run tauri build -- --target aarch64-apple-darwin
 ```
+
+The Tauri CLI does **not** auto-load the repo's `.env`, so these have to be
+exported (or the file sourced) explicitly — the same as the Apple variables.
 
 `createUpdaterArtifacts` makes the bundler **refuse to build** without the
 signing key rather than emit an unsigned artifact, so a local bundle needs the
