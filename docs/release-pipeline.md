@@ -222,6 +222,7 @@ exactly like one that didn't until a user downloads it. So the workflow asserts:
 | `xcrun stapler validate` (app **and** dmg) | Tauri silently skipping notarization, e.g. an env var it didn't recognize |
 | `spctl -a -vvv -t exec` | Gatekeeper's own verdict, as a first-launch user's Mac sees it |
 | `lipo -archs` per binary | an `x86_64` slice sneaking into an arm64-only build |
+| updater key id, signature vs. shipped pubkey | a `TAURI_SIGNING_PRIVATE_KEY` that is not the pair of the committed pubkey — an update every install would reject |
 
 There is no entitlements file. Litecter needs none: it is not sandboxed, and
 the headless browser it drives is spawned as a separate process, which hardened

@@ -339,6 +339,30 @@ jobs:
           echo "=== latest.json ==="; cat release-assets/latest.json
           ls -la release-assets
 
+      # The last unverified link: that TAURI_SIGNING_PRIVATE_KEY is actually the
+      # pair of the pubkey compiled into the app. Nothing upstream compares them
+      # — a rotated key, or a secret set from the wrong file, builds green,
+      # publishes green, and then fails signature verification on every user's
+      # machine at install time, where we cannot see it.
+      #
+      # A minisign public key and a minisign signature both carry the same
+      # 8-byte key id at the same offset (after 2 algorithm bytes, which differ
+      # by design: "Ed" in a key, "ED" in a prehashed signature). Same check as
+      # scripts/verify-updater-key.sh, run against what is about to ship.
+      - name: Assert the signature matches the shipped pubkey
+        run: |
+          set -euo pipefail
+          keyid() { base64 -d | od -An -v -tx1 | tr -d ' \n' | cut -c5-20; }
+          pub_id="$(jq -r .plugins.updater.pubkey app/src-tauri/tauri.conf.json | base64 -d | tail -1 | keyid)"
+          sig_id="$(jq -r '.platforms."darwin-aarch64".signature' release-assets/latest.json | base64 -d | sed -n 2p | keyid)"
+          if [ -z "$pub_id" ] || [ "$pub_id" != "$sig_id" ]; then
+            echo "::error::updater key mismatch — pubkey $pub_id, signature $sig_id."
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not the pair of plugins.updater.pubkey."
+            echo "::error::Publishing this would ship an update every install rejects. See docs/auto-update.md."
+            exit 1
+          fi
+          echo "updater key id $pub_id — signature matches the shipped pubkey"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
