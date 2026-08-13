@@ -23,6 +23,22 @@ pub struct Remote {
     pub etag: String,
 }
 
+/// Which half of setup is asking for a connection to be checked.
+///
+/// It exists for exactly one status code. A 401 means opposite things on the two
+/// paths, and the advice that fits one is destructive on the other: telling
+/// someone restoring an existing backup to change their backend's `SYNC_TOKEN`
+/// strands the backup they were trying to reach — the object is stored under a
+/// hash of that token, and the key they replaced was the only thing that could
+/// decrypt it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Intent {
+    /// An address typed into setup, checked with whatever key this machine has.
+    Connecting,
+    /// A connection string pasted from a machine that already backs up.
+    Adopting,
+}
+
 pub struct SyncClient {
     http: Client,
     endpoint: String,
@@ -55,6 +71,23 @@ impl SyncClient {
     ///   that into "outdated" means nagging every offline user to redeploy a
     ///   worker that was already current.
     pub async fn meta(&self) -> Result<WorkerMeta> {
+        match self.fetch_meta().await? {
+            MetaOutcome::Meta(meta) => Ok(meta),
+            MetaOutcome::PreVersioning => {
+                Ok(WorkerMeta { version: PRE_VERSIONING, features: Vec::new() })
+            }
+            MetaOutcome::Refused(status) => {
+                bail!("your backup backend returned {status}{}", detail(status))
+            }
+        }
+    }
+
+    /// The three outcomes above, before they are flattened into a version.
+    ///
+    /// [`verify`](Self::verify) needs to tell a rejected token apart from every
+    /// other failure, and it cannot do that once `meta` has turned the status
+    /// into prose.
+    async fn fetch_meta(&self) -> Result<MetaOutcome> {
         let response = self
             .http
             .get(format!("{}/v1/meta", self.endpoint))
@@ -65,11 +98,13 @@ impl SyncClient {
             .context("contacting your backup backend")?;
 
         match response.status() {
-            StatusCode::OK => response.json().await.context("reading the backend's version"),
-            StatusCode::NOT_FOUND => {
-                Ok(WorkerMeta { version: PRE_VERSIONING, features: Vec::new() })
-            }
-            status => bail!("your backup backend returned {status}{}", detail(status)),
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("reading the backend's version")
+                .map(MetaOutcome::Meta),
+            StatusCode::NOT_FOUND => Ok(MetaOutcome::PreVersioning),
+            status => Ok(MetaOutcome::Refused(status)),
         }
     }
 
@@ -78,14 +113,14 @@ impl SyncClient {
     /// Setup ends here rather than at "the instructions said it worked": the
     /// app cannot see the user's Cloudflare account, so proving the connection
     /// from this side is the only verification that means anything.
-    pub async fn verify(&self) -> Result<WorkerMeta> {
-        match self.meta().await {
-            Ok(meta) if meta.version != PRE_VERSIONING => Ok(meta),
+    pub async fn verify(&self, intent: Intent) -> Result<WorkerMeta> {
+        match self.fetch_meta().await? {
+            MetaOutcome::Meta(meta) if meta.version != PRE_VERSIONING => Ok(meta),
             // A 404 is ambiguous in a way it is not during a routine probe: it
             // is either a worker deployed before `/v1/meta` existed, or an
             // address that has nothing to do with Litecter. `/v1/health` tells
             // the two apart, and the difference is the whole error message.
-            Ok(_) => match self.health().await {
+            MetaOutcome::Meta(_) | MetaOutcome::PreVersioning => match self.health().await {
                 Ok(true) => bail!(
                     "that backend is running a version from before Litecter checked versions. \
                      Redeploy it with the current worker code, then connect again."
@@ -95,7 +130,10 @@ impl SyncClient {
                      Check you pasted the Worker's URL and not something else."
                 ),
             },
-            Err(e) => Err(e),
+            MetaOutcome::Refused(StatusCode::UNAUTHORIZED) => bail!("{}", rejected(intent)),
+            MetaOutcome::Refused(status) => {
+                bail!("your backup backend returned {status}{}", detail(status))
+            }
         }
     }
 
@@ -207,6 +245,35 @@ struct Health {
     ok: bool,
 }
 
+/// What `/v1/meta` said, before it is judged.
+enum MetaOutcome {
+    Meta(WorkerMeta),
+    /// Answered, but predates the route — old, and positively identified.
+    PreVersioning,
+    Refused(StatusCode),
+}
+
+/// The message for a token the backend would not accept, during setup.
+///
+/// Setup is the one place where "make the backend's secret match this machine"
+/// is the wrong instruction often enough to be dangerous, so each path names its
+/// own likely mistake and the recovery that does not cost a backup.
+fn rejected(intent: Intent) -> &'static str {
+    match intent {
+        Intent::Connecting => {
+            "that backend rejected this machine's token. If you are restoring a backup made on \
+             another machine, go back and choose “Restore an existing backup” — its connection \
+             string is the only thing that can decrypt it, and changing the backend's SYNC_TOKEN \
+             to match this machine would strand it. If you just deployed this backend, set its \
+             SYNC_TOKEN secret to the token shown above and deploy again."
+        }
+        Intent::Adopting => {
+            "that backend rejected the key in this connection string. Check you pasted all of it, \
+             and that it came from the machine that backs up to this address."
+        }
+    }
+}
+
 /// Turn the handful of statuses a user can actually act on into advice.
 ///
 /// These read differently now that the backend belongs to the user: a 401 is no
@@ -225,5 +292,32 @@ fn detail(status: StatusCode) -> &'static str {
         StatusCode::PAYLOAD_TOO_LARGE => " — the document exceeds the 8 MB limit",
         s if s.is_server_error() => " — the backend is having trouble; this usually resolves itself",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rejected_token_during_setup_offers_the_restore_path() {
+        // The likeliest reason a fresh machine is refused by a backend that
+        // exists is that the backup already there was made with another key.
+        // "Change SYNC_TOKEN to match this machine" is the advice that loses it,
+        // so the restore route has to be named first.
+        let msg = rejected(Intent::Connecting);
+        assert!(msg.contains("Restore an existing backup"), "got: {msg}");
+        let restore = msg.find("Restore an existing backup").unwrap();
+        let secret = msg.find("SYNC_TOKEN").unwrap();
+        assert!(restore < secret, "the recoverable option has to come first: {msg}");
+    }
+
+    #[test]
+    fn a_rejected_key_while_adopting_never_suggests_changing_the_secret() {
+        // Here the user pasted a key, so a 401 means the paste is wrong — not
+        // the deployment. Sending them to redeploy the backend would break a
+        // backup that is working for the machine they copied from.
+        let msg = rejected(Intent::Adopting);
+        assert!(!msg.contains("SYNC_TOKEN"), "got: {msg}");
     }
 }

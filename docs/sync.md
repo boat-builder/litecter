@@ -170,6 +170,23 @@ litecter sync
 `litecter sync link` on the first machine prints that string; Settings → Backup
 → *Show connection for another machine* is the same thing in the app.
 
+In the app the receiving end is Settings → Backup → **Restore an existing
+backup…**, which is a peer of *Set up backup* rather than something hidden
+inside it. On a second machine there is nothing to deploy, and the deploy path
+does not merely waste that user's time: it mints a fresh key, so connecting with
+it is refused by their own backend, and the obvious next move — making the
+Worker's `SYNC_TOKEN` match this machine — strands the backup it was meant to
+reach. `Intent::Connecting` exists so that 401 names the restore path first.
+
+Restoring runs its round immediately rather than waiting for the scheduler, and
+reports what came back. The first sync *is* the restore; a dialog that closes on
+"connected" while the window sits empty for a minute reads as a failure.
+
+A paste carrying only a key — what earlier versions handed out — adopts the key
+and stops there, because that half cannot be regenerated and the other half can.
+The app then asks for the address instead of reporting success it hasn't earned:
+`is_configured` wants both halves, and so does the user.
+
 The watch list, settings and inbox arrive; snapshots do not. Restored URLs become
 due immediately so the machine builds baselines rather than sitting idle.
 

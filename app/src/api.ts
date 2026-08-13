@@ -91,14 +91,32 @@ export const api = {
   getWorkerSource: () => invoke<string>('get_worker_source'),
   getInstructions: (kind: 'setup' | 'update', route: Route) =>
     invoke<Instructions>('get_instructions', { kind, route }),
-  connectBackend: (url: string) => invoke<void>('connect_backend', { url }),
-  adoptLink: (code: string) => invoke<void>('adopt_link', { code }),
+  /** `restoring` only changes what a rejected token says — see sync::Intent. */
+  connectBackend: (url: string, restoring = false) =>
+    invoke<void>('connect_backend', { url, restoring }),
+  /** Resolves false when the paste carried only a key, so no backend is set yet. */
+  adoptLink: (code: string) => invoke<boolean>('adopt_link', { code }),
   checkWorker: () => invoke<number | null>('check_worker'),
   eraseBackup: () => invoke<void>('erase_backup'),
   disconnectBackend: () => invoke<void>('disconnect_backend'),
   syncNow: () => invoke<SyncOutcome>('sync_now_cmd'),
   openExternal: (url: string) => invoke<void>('open_external', { url }),
 };
+
+/**
+ * The same round, told from the other direction.
+ *
+ * The first sync after adopting a connection is a restore, and the user is
+ * waiting to see their list come back — "Backed up 42 URL(s)" answers a question
+ * they did not ask.
+ */
+export function describeRestore(o: SyncOutcome): string {
+  const parts: string[] = [];
+  if (o.added) parts.push(`${o.added} URL(s)`);
+  if (o.pendings_restored) parts.push(`${o.pendings_restored} unreviewed change(s)`);
+  if (!parts.length) return `Connected — this machine was already up to date`;
+  return `Restored ${parts.join(' and ')} from your backup`;
+}
 
 /** Summarise a completed sync in one line of plain language. */
 export function describeSync(o: SyncOutcome): string {

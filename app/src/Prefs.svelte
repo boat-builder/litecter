@@ -15,6 +15,10 @@
   let syncing = false;
   let syncError = '';
   let backend: 'setup' | 'update' | null = null;
+  // Which half of setup to open on. Someone on their second machine has no
+  // backend to deploy, and shouldn't have to walk through the deploy routes to
+  // discover that.
+  let backendStart: 'deploy' | 'restore' = 'deploy';
   let confirmingErase = false;
   let erasing = false;
   // The status line under the update row: always says which version is running,
@@ -213,7 +217,19 @@
             uploaded. They're encrypted here, with a key the backend never sees.
           </small>
           <div class="inline">
-            <button class="primary" on:click={() => (backend = 'setup')}>Set up backup</button>
+            <button
+              class="primary"
+              on:click={() => ((backendStart = 'deploy'), (backend = 'setup'))}
+            >
+              Set up backup
+            </button>
+            <!-- Deploying and restoring are different tasks, not one task with a
+                 fallback: on a second machine there is nothing to deploy, and a
+                 user who doesn't find this here deploys a second backend the
+                 first one's key cannot decrypt. -->
+            <button on:click={() => ((backendStart = 'restore'), (backend = 'setup'))}>
+              Restore an existing backup…
+            </button>
           </div>
           {#if sync?.key}
             <p class="note">
@@ -279,6 +295,7 @@
 {#if backend}
   <Backend
     mode={backend}
+    start={backendStart}
     {sync}
     on:close={() => (backend = null)}
     on:changed={refreshSync}
