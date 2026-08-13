@@ -40,11 +40,20 @@ keyid() { b64d | od -An -v -tx1 | tr -d ' \n' | cut -c5-20; }
 
 echo "Environment"
 
-if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f .env ]; then
+# .env wins over the ambient environment. The point of this script is to check
+# what is actually configured, not whatever a shell happened to export three
+# hours ago — and a stale export is exactly how you end up comparing a new
+# pubkey against an old private key and concluding the keypair is broken.
+env_key="${TAURI_SIGNING_PRIVATE_KEY:-}"
+
+if [ -f .env ]; then
   set -a; . ./.env; set +a
   ok ".env sourced"
-elif [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  ok "using TAURI_SIGNING_PRIVATE_KEY already in the environment"
+  if [ -n "$env_key" ] && [ "$env_key" != "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+    fail "this shell exports a DIFFERENT TAURI_SIGNING_PRIVATE_KEY than .env holds. .env wins for the checks below, but a build run from this shell would sign with the stale key. Start a new shell, or: unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+  fi
+elif [ -n "$env_key" ]; then
+  ok "no .env — using TAURI_SIGNING_PRIVATE_KEY from the environment"
 else
   die "no .env and no TAURI_SIGNING_PRIVATE_KEY exported"
 fi
