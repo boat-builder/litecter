@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Litecter — watch web pages for changes</title>
+    <meta
+      name="description"
+      content="Litecter renders every page in a real browser, diffs the visible text, and collects what changed in an inbox. A macOS menu-bar app and a CLI daemon."
+    />
+    <link rel="canonical" href="https://litecter.cc/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://litecter.cc/" />
+    <meta property="og:title" content="Litecter — watch web pages for changes" />
+    <meta
+      property="og:description"
+      content="Renders every page in a real browser, diffs the visible text, and collects what changed in an inbox."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="theme-color" content="#4f46e5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171719" media="(prefers-color-scheme: dark)" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f46e5'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23fff' stroke-width='3.5'/%3E%3Ccircle cx='16' cy='16' r='3.2' fill='%23fff'/%3E%3C/svg%3E"
+    />
+
+    <style>
+      :root {
+        --bg: #fbfbfc;
+        --panel: #ffffff;
+        --fg: #17171a;
+        --muted: #6e6e77;
+        --line: #e6e6ea;
+        --line-soft: #f0f0f3;
+        --accent: #4f46e5;
+        --accent-hover: #423ac9;
+        --accent-soft: #eef0fe;
+        --green: #0a7d33;
+        --green-bg: #eaf7ef;
+        --red: #c73030;
+        --red-bg: #fdeeee;
+        --shadow: 0 1px 2px rgba(16, 16, 30, 0.04), 0 12px 32px -12px rgba(16, 16, 30, 0.14);
+        --radius: 14px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #131315;
+          --panel: #1c1c1f;
+          --fg: #ececf0;
+          --muted: #9a9aa4;
+          --line: #2c2c31;
+          --line-soft: #232327;
+          --accent: #818cf8;
+          --accent-hover: #99a2fa;
+          --accent-soft: #26263f;
+          --green: #4ade80;
+          --green-bg: #14291b;
+          --red: #f87171;
+          --red-bg: #331c1c;
+          --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 40px -16px rgba(0, 0, 0, 0.7);
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      /* Soft indigo wash behind the hero, fading into the page. */
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0 0 auto 0;
+        height: 520px;
+        background:
+          radial-gradient(900px 380px at 50% -140px, var(--accent-soft), transparent 70%);
+        opacity: 0.9;
+        pointer-events: none;
+        z-index: -1;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .wrap {
+        width: 100%;
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* ------------------------------------------------------------ header */
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 22px 0 8px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        text-decoration: none;
+      }
+
+      .brand svg {
+        display: block;
+        border-radius: 8px;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        font-size: 14.5px;
+        color: var(--muted);
+      }
+
+      .nav a {
+        text-decoration: none;
+      }
+
+      .nav a:hover {
+        color: var(--fg);
+      }
+
+      /* -------------------------------------------------------------- hero */
+      .hero {
+        padding: 72px 0 8px;
+        text-align: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 13px 5px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 13px;
+        letter-spacing: 0.01em;
+      }
+
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--green);
+        box-shadow: 0 0 0 3px var(--green-bg);
+      }
+
+      h1 {
+        margin: 26px 0 0;
+        font-size: clamp(38px, 6.2vw, 60px);
+        line-height: 1.06;
+        letter-spacing: -0.035em;
+        font-weight: 680;
+      }
+
+      h1 .quiet {
+        color: var(--muted);
+      }
+
+      .lede {
+        margin: 20px auto 0;
+        max-width: 620px;
+        font-size: clamp(16.5px, 2.1vw, 18.5px);
+        color: var(--muted);
+        line-height: 1.62;
+      }
+
+      /* ---------------------------------------------------------- download */
+      .cta {
+        margin-top: 34px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 11px;
+        padding: 14px 26px;
+        border-radius: 12px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        text-decoration: none;
+        box-shadow: 0 1px 2px rgba(16, 16, 30, 0.12), 0 10px 24px -10px var(--accent);
+        transition: background 120ms ease, transform 120ms ease;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .btn {
+          color: #16161a;
+        }
+      }
+
+      .btn:hover {
+        background: var(--accent-hover);
+        transform: translateY(-1px);
+      }
+
+      .btn:active {
+        transform: translateY(0);
+      }
+
+      .btn svg {
+        flex: none;
+      }
+
+      .cta-meta {
+        margin: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        font-size: 13.5px;
+        color: var(--muted);
+      }
+
+      .cta-meta a {
+        color: var(--muted);
+      }
+
+      .sep {
+        opacity: 0.45;
+        padding: 0 7px;
+      }
+
+      /* ------------------------------------------------------- inbox mock */
+      .shot {
+        margin: 56px 0 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        text-align: left;
+      }
+
+      .shot-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(var(--panel), var(--line-soft));
+      }
+
+      .tl {
+        width: 11px;
+        height: 11px;
+        border-radius: 999px;
+        background: var(--line);
+      }
+
+      .shot-title {
+        margin-left: 6px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .tabs {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 12px 18px 0;
+        font-size: 13.5px;
+        color: var(--muted);
+      }
+
+      .tab-on {
+        color: var(--fg);
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .pill {
+        background: var(--accent);
+        color: #fff;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 1px 8px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .pill {
+          color: #16161a;
+        }
+      }
+
+      .rows {
+        padding: 8px 0 6px;
+      }
+
+      .row {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        padding: 13px 18px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .rows .row:first-child {
+        border-top: none;
+      }
+
+      .row .mark {
+        width: 7px;
+        height: 7px;
+        margin-top: 8px;
+        border-radius: 999px;
+        background: var(--accent);
+        flex: none;
+      }
+
+      .row.read .mark {
+        background: var(--line);
+      }
+
+      .row-main {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .row-host {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .row.read .row-host {
+        font-weight: 500;
+        color: var(--muted);
+      }
+
+      .row-when {
+        font-size: 12.5px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .diff {
+        margin-top: 8px;
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+        font-size: 12.5px;
+        line-height: 1.55;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .diff div {
+        padding: 3px 10px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .del {
+        background: var(--red-bg);
+        color: var(--red);
+      }
+
+      .add {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+
+      /* ---------------------------------------------------------- sections */
+      section {
+        padding: 84px 0 0;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 650;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .grid {
+        margin-top: 26px;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 20px;
+      }
+
+      .card {
+        padding: 22px 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+
+      .card h3 {
+        margin: 14px 0 7px;
+        font-size: 16.5px;
+        font-weight: 640;
+        letter-spacing: -0.015em;
+      }
+
+      .card p {
+        margin: 0;
+        font-size: 14.5px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .icon {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      /* --------------------------------------------------------------- cli */
+      .cli {
+        margin-top: 26px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 28px;
+        align-items: center;
+      }
+
+      .cli p {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .cli p strong {
+        color: var(--fg);
+        font-weight: 600;
+      }
+
+      pre {
+        margin: 0;
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        color: var(--fg);
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+        font-size: 13px;
+        line-height: 1.85;
+        overflow-x: auto;
+      }
+
+      pre .c {
+        color: var(--muted);
+      }
+
+      pre .p {
+        color: var(--accent);
+        user-select: none;
+      }
+
+      /* ------------------------------------------------------------ footer */
+      .note {
+        margin-top: 26px;
+        padding: 16px 20px;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent);
+        border-radius: 10px;
+        background: var(--panel);
+        font-size: 14.5px;
+        color: var(--muted);
+      }
+
+      .note strong {
+        color: var(--fg);
+        font-weight: 600;
+      }
+
+      footer {
+        margin-top: 90px;
+        padding: 26px 0 40px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 22px;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13.5px;
+        color: var(--muted);
+      }
+
+      footer a {
+        text-decoration: none;
+      }
+
+      footer a:hover {
+        color: var(--fg);
+      }
+
+      .footer-links {
+        display: flex;
+        gap: 22px;
+      }
+
+      @media (max-width: 760px) {
+        .grid,
+        .cli {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          padding-top: 52px;
+        }
+
+        section {
+          padding-top: 64px;
+        }
+
+        .nav .hide-sm {
+          display: none;
+        }
+
+        .row-when {
+          display: none;
+        }
+      }
+
+      /* Stack the button's meta line rather than breaking mid-phrase. */
+      @media (max-width: 480px) {
+        .cta-meta {
+          flex-direction: column;
+          gap: 3px;
+        }
+
+        .cta-meta .sep {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="wrap">
+      <header>
+        <a class="brand" href="/">
+          <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" fill="#4f46e5" />
+            <circle cx="16" cy="16" r="9" fill="none" stroke="#fff" stroke-width="3.5" />
+            <circle cx="16" cy="16" r="3.2" fill="#fff" />
+          </svg>
+          Litecter
+        </a>
+        <nav class="nav">
+          <a class="hide-sm" href="#how">How it works</a>
+          <a class="hide-sm" href="#cli">CLI</a>
+          <a href="https://github.com/boat-builder/litecter">GitHub</a>
+          <a href="/download/mac">Download</a>
+        </nav>
+      </header>
+
+      <div class="hero">
+        <span class="eyebrow"><span class="dot"></span> macOS menu bar &middot; free &amp; open source</span>
+
+        <h1>Watch web pages<br /><span class="quiet">for changes.</span></h1>
+
+        <p class="lede">
+          Litecter loads every page you follow in a real headless browser, diffs the text a
+          human would actually read, and collects what changed in an inbox — like mail you
+          mark as seen.
+        </p>
+
+        <div class="cta">
+          <a class="btn" href="/download/mac">
+            <svg width="17" height="20" viewBox="0 0 17 20" fill="currentColor" aria-hidden="true">
+              <path
+                d="M13.9 10.6c0-2.2 1.8-3.3 1.9-3.4-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.7.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.5 0-2.8.8-3.6 2.1-1.5 2.6-.4 6.5 1.1 8.7.7 1 1.6 2.2 2.7 2.2 1.1 0 1.5-.7 2.8-.7s1.6.7 2.8.7c1.1 0 1.9-1.1 2.6-2.1.8-1.2 1.2-2.4 1.2-2.5-.1 0-2.2-.9-2.2-3.3zM11.7 3.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.6 1.3-.6.6-1 1.6-.9 2.6 1 .1 2-.5 2.6-1.2z"
+              />
+            </svg>
+            Download for macOS
+          </a>
+          <p class="cta-meta">
+            <span>Apple Silicon &middot; signed &amp; notarized</span>
+            <span class="sep">|</span>
+            <span id="ver">__VERSION__</span>
+            <span class="sep">|</span>
+            <a href="https://github.com/boat-builder/litecter/releases/latest">Release notes</a>
+          </p>
+        </div>
+
+        <div class="shot">
+          <div class="shot-bar">
+            <span class="tl"></span><span class="tl"></span><span class="tl"></span>
+            <span class="shot-title">Litecter</span>
+          </div>
+          <div class="tabs">
+            <span class="tab-on">Changes <span class="pill">2</span></span>
+            <span>Library</span>
+          </div>
+          <div class="rows">
+            <div class="row">
+              <span class="mark"></span>
+              <div class="row-main">
+                <div class="row-host">docs.stripe.com/api</div>
+                <div class="diff">
+                  <div class="del">- Rate limit: 100 requests per second in live mode.</div>
+                  <div class="add">+ Rate limit: 250 requests per second in live mode.</div>
+                </div>
+              </div>
+              <span class="row-when">2h ago</span>
+            </div>
+            <div class="row">
+              <span class="mark"></span>
+              <div class="row-main">
+                <div class="row-host">jobs.example.com/engineering</div>
+                <div class="diff">
+                  <div class="add">+ Systems Engineer, Storage — Remote (EU)</div>
+                </div>
+              </div>
+              <span class="row-when">Yesterday</span>
+            </div>
+            <div class="row read">
+              <span class="mark"></span>
+              <div class="row-main">
+                <div class="row-host">status.openai.com</div>
+              </div>
+              <span class="row-when">Mon</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section id="how">
+        <h2>How it works</h2>
+        <div class="grid">
+          <div class="card">
+            <div class="icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2.5" y="4" width="19" height="16" rx="2.5" />
+                <path d="M2.5 8.5h19" />
+                <circle cx="6" cy="6.2" r=".6" fill="currentColor" />
+              </svg>
+            </div>
+            <h3>Rendered, not fetched</h3>
+            <p>
+              Each check runs the page in headless Chromium, so JavaScript executes and
+              single-page apps are compared the way you'd see them.
+            </p>
+          </div>
+          <div class="card">
+            <div class="icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14" />
+                <path d="M5 9h6" />
+                <path d="M13 15h6" />
+                <circle cx="12" cy="12" r="9.2" opacity=".35" />
+              </svg>
+            </div>
+            <h3>Words, not markup</h3>
+            <p>
+              Comparison runs on the visible text — normalized and hashed — so cache busters,
+              rotating tokens and class-name churn never wake you up.
+            </p>
+          </div>
+          <div class="card">
+            <div class="icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6.5h18v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <path d="M3 7l9 6.5L21 7" />
+              </svg>
+            </div>
+            <h3>An inbox, not a firehose</h3>
+            <p>
+              One unseen item per page: if it changes again the diff just extends. A daily
+              digest nags once until everything is marked seen.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="cli">
+        <h2>Also a CLI</h2>
+        <div class="cli">
+          <div>
+            <p>
+              The same Rust engine ships as <strong>litecter</strong>, a CLI and daemon for
+              servers — one SQLite file, no service to sign up for, nothing leaving your
+              machine.
+            </p>
+            <p>
+              At rest there is no browser process: a tick wakes, checks what's due, and puts
+              Chromium away.
+            </p>
+          </div>
+          <pre><span class="p">$</span> litecter add docs.stripe.com/api
+<span class="p">$</span> litecter changes        <span class="c"># the inbox</span>
+<span class="p">$</span> litecter diff 3         <span class="c"># what moved</span>
+<span class="p">$</span> litecter daemon         <span class="c"># scheduler + digest</span></pre>
+        </div>
+
+        <p class="note">
+          <strong>Before you install:</strong> Litecter drives a Chromium-family browser to
+          render pages, so you need Chrome, Chromium, Edge or Brave installed. macOS on Apple
+          Silicon only — Intel Macs are not supported, and there's no in-app updater yet, so
+          re-download to update.
+        </p>
+      </section>
+
+      <footer>
+        <span>Litecter — free and open source, MIT.</span>
+        <span class="footer-links">
+          <a href="/download/mac">Download</a>
+          <a href="https://github.com/boat-builder/litecter">GitHub</a>
+          <a href="https://github.com/boat-builder/litecter/releases">Releases</a>
+        </span>
+      </footer>
+    </div>
+  </body>
+</html>
