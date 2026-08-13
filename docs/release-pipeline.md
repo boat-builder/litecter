@@ -120,6 +120,18 @@ single quote in it, since one would terminate the quoting.
 `TAURI_SIGNING_PRIVATE_KEY_PATH`, if you would rather keep the key file and not
 inline it.)
 
+### 3. Verify the chain before you rely on it
+
+```bash
+./scripts/verify-updater-key.sh
+```
+
+Reads the key from `.env` (or the environment), confirms the CLI can sign with
+it, and — the check that earns the script — signs a scratch file and compares
+the key id in the signature against the one in the committed pubkey. A
+mismatched pair is invisible everywhere else: it builds green, publishes green,
+and then fails signature verification on every user's machine at install time.
+
 > **Back the private key and its password up outside both CI and this
 > checkout.** A GitHub secret cannot be read back and `.env` is one `rm -rf` or
 > one dead laptop from gone, so a fresh clone plus a lost machine means the key
@@ -129,7 +141,7 @@ inline it.)
 > manager the moment you generate them; the only other recovery is telling
 > users to download a fresh DMG by hand.
 
-### 3. There is no step 3
+### 4. There is no step 4
 
 In particular, the `Settings → Actions → General → Workflow permissions` radio
 does **not** need changing. This repo is on GitHub's default of `read`, and
