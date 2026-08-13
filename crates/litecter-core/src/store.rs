@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS urls (
     reviewed_at INTEGER NOT NULL DEFAULT 0
 );
 
+-- `due_urls` runs on every scheduler tick forever, and it is the only query on
+-- this table that can't be answered from the primary key.
+CREATE INDEX IF NOT EXISTS idx_urls_next_check ON urls(next_check_at);
+
 CREATE TABLE IF NOT EXISTS snapshots (
     id INTEGER PRIMARY KEY,
     url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
@@ -54,6 +58,11 @@ CREATE TABLE IF NOT EXISTS changes (
     first_change_snippet TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_changes_url ON changes(url_id);
+-- Partial, because every hot path here asks the same question: which changes are
+-- still unseen? `count_unseen` runs on every tick (tray badge + digest), and
+-- `record_change` probes for the URL's open change on every detected change.
+-- Indexing only the unseen rows keeps this tiny — it holds inbox depth, not history.
+CREATE INDEX IF NOT EXISTS idx_changes_unseen ON changes(url_id) WHERE seen_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

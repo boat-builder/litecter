@@ -2,17 +2,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Timelike;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_notification::NotificationExt as _;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use litecter_core::{
     differ, fetch_rendered, persist_check, sync, ChangeItem, Renderer, Schedule, Store, UrlRow,
@@ -21,6 +22,9 @@ use litecter_core::{
 type SharedStore = Arc<Mutex<Store>>;
 
 struct AppState {
+    /// Set when the tray's "Add link" had to build the window, and taken by the
+    /// frontend on mount. See [`show_add`].
+    focus_add: Arc<AtomicBool>,
     store: SharedStore,
     sync: SyncScheduler,
     worker: WorkerState,
@@ -36,6 +40,9 @@ struct AppState {
 struct SyncScheduler {
     state: Arc<Mutex<SyncState>>,
     running: Arc<Mutex<()>>,
+    /// Raised when the watch list first goes dirty, so the scheduler loop can
+    /// wake ahead of its tick. See [`SyncScheduler::mark_dirty`].
+    dirtied: Arc<Notify>,
 }
 
 #[derive(Default)]
@@ -47,6 +54,12 @@ struct SyncState {
     not_before: i64,
     failures: u32,
 }
+
+/// How often the scheduler asks "what's due?" — the resolution of the whole
+/// scheduler, so every check runs up to one tick late. Ten minutes is
+/// deliberate: the shortest schedule is hourly, an idle tick is a few SQLite
+/// reads, and a menu-bar app should wake as rarely as it can get away with.
+const TICK: Duration = Duration::from_secs(600);
 
 /// A burst of edits collapses into one upload this long after the first of them.
 const SYNC_DEBOUNCE_SECS: i64 = 60;
@@ -62,15 +75,22 @@ impl SyncScheduler {
         Self {
             state: Arc::new(Mutex::new(SyncState::default())),
             running: Arc::new(Mutex::new(())),
+            dirtied: Arc::new(Notify::new()),
         }
     }
 
     /// Note that the watch list changed. Only the *first* edit in a burst sets
     /// the timer, so a bulk import doesn't keep pushing its own deadline back.
+    ///
+    /// That same first edit wakes the scheduler loop. The tick is sized for
+    /// checking pages, which is far too slow to be a backup's clock — without
+    /// this nudge the debounce below would be dead weight and every edit would
+    /// wait out a full tick before it reached the backend.
     async fn mark_dirty(&self, now: i64) {
         let mut state = self.state.lock().await;
         if state.dirty_since.is_none() {
             state.dirty_since = Some(now);
+            self.dirtied.notify_one();
         }
     }
 
@@ -238,18 +258,52 @@ fn normalize_input_url(raw: &str) -> String {
     }
 }
 
+/// Open the window, building it if it isn't there.
+///
+/// `tauri.conf.json` declares no windows on purpose. A window declared there is
+/// built at startup and lives as long as the process — for a menu-bar app that
+/// means WebKit's three helper processes (~28 MB) resident for weeks, including
+/// at login under `--hidden`, where the user may never open the window at all.
+/// Building here and destroying on close means the webview costs nothing while
+/// Litecter is doing the thing it exists to do. The geometry that used to live
+/// in the config lives here now.
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
+        return;
+    }
+    match WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("Litecter")
+        .inner_size(1020.0, 700.0)
+        .min_inner_size(720.0, 480.0)
+        .build()
+    {
+        Ok(w) => {
+            let _ = w.set_focus();
+        }
+        // Not fatal — the tray is the app. Checking carries on, and the next
+        // click gets another go.
+        Err(e) => eprintln!("could not open the window: {e:#}"),
     }
 }
 
 /// Show the window with the add bar focused — the tray's "Add link" path.
-/// Emitted after `show_main` so the webview is visible before it takes focus.
+///
+/// Two routes, because a window that has to be built first has nothing
+/// listening yet — the event would fire into the void while the webview boots.
+/// A fresh window picks the request up on mount via `take_focus_add`; a window
+/// that already exists gets the event, since its `onMount` has long since run.
 fn show_add(app: &AppHandle) {
+    let existed = app.get_webview_window("main").is_some();
+    if !existed {
+        let state: State<'_, AppState> = app.state();
+        state.focus_add.store(true, Ordering::Relaxed);
+    }
     show_main(app);
-    let _ = app.emit("litecter://focus-add", ());
+    if existed {
+        let _ = app.emit("litecter://focus-add", ());
+    }
 }
 
 // ---- background checking ----------------------------------------------------
@@ -307,14 +361,27 @@ async fn spawn_check(app: AppHandle, store: SharedStore, ids: Option<Vec<i64>>) 
     let _ = app.emit("litecter://refresh", ());
 }
 
+/// Last count painted on the tray. Starts at a value no count can take, so the
+/// first call always paints.
+static TRAY_UNSEEN: AtomicI64 = AtomicI64::new(-1);
+
 async fn update_tray(app: &AppHandle, store: &SharedStore) {
     let unseen = { store.lock().await.count_unseen().unwrap_or(0) };
+    // Called on every tick, so almost every call is repainting a title that
+    // hasn't moved. The AppKit round-trip is cheap but it is not free, and it is
+    // pure waste on a menu bar nobody is looking at.
+    if TRAY_UNSEEN.load(Ordering::Relaxed) == unseen {
+        return;
+    }
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_title(if unseen > 0 {
             Some(unseen.to_string())
         } else {
             None::<String>
         });
+        // Recorded only on the path that actually painted, so a call that
+        // arrives before the tray exists doesn't suppress the real one.
+        TRAY_UNSEEN.store(unseen, Ordering::Relaxed);
     }
 }
 
@@ -368,7 +435,19 @@ async fn scheduler_loop(app: AppHandle, store: SharedStore, scheduler: SyncSched
         maybe_digest(&app, &store).await;
         maybe_sync(&app, &store, &scheduler).await;
         update_tray(&app, &store).await;
-        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        // Sleep out the tick, unless an edit lands first — then wait out the
+        // debounce instead, so a burst still collapses into a single upload but
+        // reaches the backend in about a minute rather than at the next tick.
+        // The extra second is slack: `take_if_due` compares whole seconds, and
+        // sleeping exactly the debounce can land a tick short of it and postpone
+        // the upload by a full TICK.
+        tokio::select! {
+            _ = tokio::time::sleep(TICK) => {}
+            _ = scheduler.dirtied.notified() => {
+                tokio::time::sleep(Duration::from_secs(SYNC_DEBOUNCE_SECS as u64 + 1)).await;
+            }
+        }
     }
 }
 
@@ -431,6 +510,13 @@ async fn set_schedule(
     }
     state.sync.mark_dirty(now).await;
     Ok(())
+}
+
+/// Whether this window was opened by the tray's "Add link". Taken, not read —
+/// the request is consumed so a later window doesn't inherit it.
+#[tauri::command]
+async fn take_focus_add(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.focus_add.swap(false, Ordering::Relaxed))
 }
 
 #[tauri::command]
@@ -863,6 +949,7 @@ fn main() {
             let sync_scheduler = SyncScheduler::new();
             let worker_state = WorkerState::default();
             app.manage(AppState {
+                focus_add: Arc::new(AtomicBool::new(false)),
                 store: store.clone(),
                 sync: sync_scheduler.clone(),
                 worker: worker_state.clone(),
@@ -907,12 +994,11 @@ fn main() {
             });
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
+        // Note the absence of a CloseRequested handler. Closing the window used
+        // to hide it, which kept the webview — and its WebKit helpers — alive
+        // for the life of the process. Closing now destroys it and gives that
+        // memory back; `show_main` rebuilds it on demand. What keeps the app
+        // alive without a window is the ExitRequested arm in `run` below.
         .invoke_handler(tauri::generate_handler![
             list_urls,
             add_urls,
@@ -934,8 +1020,25 @@ fn main() {
             erase_backup,
             disconnect_backend,
             sync_now_cmd,
+            take_focus_add,
             open_external
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Litecter");
+        .build(tauri::generate_context!())
+        .expect("error while building Litecter")
+        .run(|app, event| match event {
+            // Closing the window must not end the process — the tray is the
+            // app, and the scheduler has to keep checking. `code` is `Some`
+            // only when something actually asked to quit (the tray's Quit calls
+            // `app.exit(0)`), so that path is left alone.
+            RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
+                api.prevent_exit();
+            }
+            // Clicking the Dock icon with no window open. Without this the icon
+            // is dead once you've closed the window.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { has_visible_windows, .. } if !has_visible_windows => {
+                show_main(app);
+            }
+            _ => {}
+        });
 }
