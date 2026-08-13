@@ -101,19 +101,33 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R boat-builder/litecter   # pr
 gh secret list -R boat-builder/litecter                                     # expect 8
 ```
 
-For local signed builds, the CLI also accepts a *path* instead of the key's
-contents, which avoids putting the key in a dotfile at all:
+Finally, fold both into the gitignored root `.env` alongside the Apple
+credentials, so local signed builds work and the generated key files can be
+deleted:
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/litecter.key
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…'
+printf "TAURI_SIGNING_PRIVATE_KEY='%s'\n" "$(cat ~/.tauri/litecter.key)" >> .env
+printf "TAURI_SIGNING_PRIVATE_KEY_PASSWORD='%s'\n" 'the-password' >> .env
+rm ~/.tauri/litecter.key ~/.tauri/litecter.key.pub
 ```
 
-> **Back the private key and its password up somewhere outside CI.** Installed
-> copies only accept artifacts signed by the pubkey they were built with, so
-> losing either strands every existing install on its current version
-> permanently — the only recovery is telling users to download a fresh DMG by
-> hand.
+Single-quote every value in this file. That is what makes `set -a; . ./.env`
+safe for credentials with spaces, parentheses or trailing whitespace — the
+corruption mode called out in the warning above. Pick a password with no
+single quote in it, since one would terminate the quoting.
+
+(`TAURI_SIGNING_PRIVATE_KEY` also accepts a *path* under the alternate name
+`TAURI_SIGNING_PRIVATE_KEY_PATH`, if you would rather keep the key file and not
+inline it.)
+
+> **Back the private key and its password up outside both CI and this
+> checkout.** A GitHub secret cannot be read back and `.env` is one `rm -rf` or
+> one dead laptop from gone, so a fresh clone plus a lost machine means the key
+> is unrecoverable — and installed copies only accept artifacts signed by the
+> pubkey they were built with, so losing it strands every existing install on
+> its current version permanently. Put the key and password in a password
+> manager the moment you generate them; the only other recovery is telling
+> users to download a fresh DMG by hand.
 
 ### 3. There is no step 3
 
@@ -263,14 +277,13 @@ release. To check that the build and bundle paths are right without publishing,
 build locally — it produces the same layout the workflow expects:
 
 ```bash
-cd app
-export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/litecter.key
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…'
-npm run tauri build -- --target aarch64-apple-darwin
+set -a; . ./.env; set +a          # Apple six + the two TAURI_SIGNING_* vars
+cd app && npm run tauri build -- --target aarch64-apple-darwin
 ```
 
-The Tauri CLI does **not** auto-load the repo's `.env`, so these have to be
-exported (or the file sourced) explicitly — the same as the Apple variables.
+The Tauri CLI does **not** auto-load the repo's `.env`, so it has to be sourced
+explicitly. That is safe as long as every value in it is single-quoted — see
+[one-time setup step 2](#2-generate-the-updater-keypair).
 
 `createUpdaterArtifacts` makes the bundler **refuse to build** without the
 signing key rather than emit an unsigned artifact, so a local bundle needs the
